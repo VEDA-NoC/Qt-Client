@@ -1,3 +1,14 @@
-# Qt build directories 
-build/ 
-*.user 
+# Qt/CMake build directories and generated files
+build/
+build-*/
+build-codex-mingw/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.user
+
+# Local certificates and runtime configuration
+certs/*.crt
+certs/*.pem
+certs/*.key

@@ -1,3 +1,0 @@
-C:\Qt\Tools\CMake_64\bin\cmake.exe -E rm -f CMakeFiles\qt_4ch_viewer.dir/objects.a
-C:\Qt\Tools\mingw1310_64\bin\ar.exe qc CMakeFiles\qt_4ch_viewer.dir/objects.a @CMakeFiles\qt_4ch_viewer.dir\objects1.rsp
-C:\Qt\Tools\mingw1310_64\bin\g++.exe -g -mwindows -Wl,--whole-archive CMakeFiles\qt_4ch_viewer.dir/objects.a -Wl,--no-whole-archive -o qt_4ch_viewer.exe -Wl,--out-implib,libqt_4ch_viewer.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\qt_4ch_viewer.dir\linkLibs.rsp
