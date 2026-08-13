@@ -1,0 +1,24 @@
+<RCC>
+    <qresource prefix="/fonts">
+        <file alias="Pretendard-Regular.ttf">resources/fonts/Pretendard-Regular.ttf</file>
+        <file alias="Pretendard-Medium.ttf">resources/fonts/Pretendard-Medium.ttf</file>
+        <file alias="Pretendard-SemiBold.ttf">resources/fonts/Pretendard-SemiBold.ttf</file>
+        <file alias="Pretendard-Bold.ttf">resources/fonts/Pretendard-Bold.ttf</file>
+    </qresource>
+    <qresource prefix="/icons">
+        <file alias="app-icon.png">resources/icons/veda-vms-app-icon-v2.png</file>
+        <file alias="user.svg">resources/icons/user.svg</file>
+        <file alias="sidebar/live.png">resources/icons/sidebar/live.png</file>
+        <file alias="sidebar/live-muted.png">resources/icons/sidebar/live-muted.png</file>
+        <file alias="sidebar/playback.png">resources/icons/sidebar/playback.png</file>
+        <file alias="sidebar/playback-muted.png">resources/icons/sidebar/playback-muted.png</file>
+        <file alias="sidebar/events.png">resources/icons/sidebar/events.png</file>
+        <file alias="sidebar/events-muted.png">resources/icons/sidebar/events-muted.png</file>
+        <file alias="sidebar/devices.png">resources/icons/sidebar/devices.png</file>
+        <file alias="sidebar/devices-muted.png">resources/icons/sidebar/devices-muted.png</file>
+        <file alias="sidebar/settings.png">resources/icons/sidebar/settings.png</file>
+        <file alias="sidebar/settings-muted.png">resources/icons/sidebar/settings-muted.png</file>
+        <file alias="timeline/zoom-in.svg">resources/icons/timeline/zoom-in.svg</file>
+        <file alias="timeline/zoom-out.svg">resources/icons/timeline/zoom-out.svg</file>
+    </qresource>
+</RCC>

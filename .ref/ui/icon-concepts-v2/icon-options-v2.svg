@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1680 620">
+  <rect width="1680" height="620" fill="#EFEEE8"/>
+  <g transform="translate(70 50)"><image href="option-a-grid.svg" width="480" height="480"/><text x="240" y="545" text-anchor="middle" font-family="Pretendard, sans-serif" font-size="32" fill="#1D1E37">A · 4채널 그리드</text></g>
+  <g transform="translate(600 50)"><image href="option-b-focus.svg" width="480" height="480"/><text x="240" y="545" text-anchor="middle" font-family="Pretendard, sans-serif" font-size="32" fill="#1D1E37">B · 포커스</text></g>
+  <g transform="translate(1130 50)"><image href="option-c-safety.svg" width="480" height="480"/><text x="240" y="545" text-anchor="middle" font-family="Pretendard, sans-serif" font-size="32" fill="#1D1E37">C · 안전 제어</text></g>
+</svg>
