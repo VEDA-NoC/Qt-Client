@@ -3,6 +3,7 @@
 
 #include <QWidget>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -19,13 +20,18 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
 
 signals:
     void actionTriggered(const QString &actionType, const ParkingEventItem &event);
 
 private:
     void setupUi();
+    void applyStmEvent();
     void applyTheme();
+    // 고정 영역에만 나타나는 종류(stm.fire_started && CRITICAL)인지 — Q3에서
+    // 이 종류만 카드 전체 클릭으로 대응 서브창을 연다.
+    bool isPinnableFireCard() const;
 
     ParkingEventItem event_;
     QLabel *icon_label_{nullptr};

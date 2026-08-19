@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QMainWindow>
+#include <QSet>
 #include <QString>
 #include <QUrl>
 #include <QVector>
@@ -36,6 +37,8 @@ class ParkingEventStore;
 class ParkingEventCardWidget;
 struct ParkingEventBatch;
 struct ParkingEventItem;
+class StmApiClient;
+class StmDeviceListWidget;
 class QTableWidget;
 class QVBoxLayout;
 class QHBoxLayout;
@@ -91,7 +94,6 @@ private:
     QWidget *createEventsPage(QWidget *parent);
     QWidget *createDevicesPage(QWidget *parent);
     QWidget *createSettingsPage(QWidget *parent);
-    QWidget *createEmptyState(const QString &title, const QString &description, QWidget *parent) const;
     QFrame *createSummaryCard(const QString &title,
                               const QString &value,
                               const QString &caption,
@@ -148,6 +150,8 @@ private:
     void handleEventUpdatedInStore(const ParkingEventItem &item);
     void refreshEventsTable();
     void updateLiveEventsPanel();
+    void syncEventCards(QVBoxLayout *layout, QWidget *container, const QVector<ParkingEventItem> &items);
+    void handleEventCardAction(const QString &action, const ParkingEventItem &event);
     void appendEventRow(const ParkingEventItem &item);
     void prependEventRow(const ParkingEventItem &item);
 
@@ -198,6 +202,9 @@ private:
     ParkingZoneEditor *parking_zone_editor_ = nullptr;
     ParkingEventApiClient *event_api_client_ = nullptr;
     ParkingEventStore *event_store_ = nullptr;
+    QWidget *live_events_pinned_container_ = nullptr;
+    QVBoxLayout *live_events_pinned_layout_ = nullptr;
+    QSet<quint64> ignored_critical_ids_;
     QVBoxLayout *live_events_card_layout_ = nullptr;
     QScrollArea *live_events_scroll_ = nullptr;
     QWidget *live_events_container_ = nullptr;
@@ -239,6 +246,8 @@ private:
     QSlider *playback_fullscreen_position_slider_ = nullptr;
     QLabel *playback_fullscreen_position_label_ = nullptr;
     PlaybackApiClient *playback_api_ = nullptr;
+    StmApiClient *stm_api_ = nullptr;
+    StmDeviceListWidget *stm_device_list_widget_ = nullptr;
     StreamWorker *playback_worker_ = nullptr;
 
     QVector<VideoPanel *> panels_;

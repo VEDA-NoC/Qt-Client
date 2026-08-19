@@ -6,6 +6,9 @@
 #include "parking_event_api_client.h"
 #include "parking_event_store.h"
 #include "parking_event_card_widget.h"
+#include "stm_api_client.h"
+#include "stm_device_list_widget.h"
+#include "stm_fire_response_dialog.h"
 #include "stream_worker.h"
 #include "timeline_widget.h"
 #include "video_panel.h"
@@ -281,6 +284,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         channel_stable_timers_.push_back(stable_timer);
     }
     playback_api_ = new PlaybackApiClient(this);
+    stm_api_ = new StmApiClient(playback_api_, this);
+    connect(stm_api_, &StmApiClient::requestFailed, this,
+            [](const QString &operation, const QString &message, int http_status) {
+                qWarning().noquote() << QString("[stm-api] operation=%1 http=%2 error=%3")
+                                            .arg(operation)
+                                            .arg(http_status)
+                                            .arg(message);
+            });
     event_store_ = new ParkingEventStore(this);
     event_api_client_ = new ParkingEventApiClient(this);
 
@@ -703,7 +714,7 @@ void MainWindow::createUi() {
     page_stack_->addWidget(createEventsPage(page_stack_));
     page_stack_->addWidget(createDevicesPage(page_stack_));
     page_stack_->addWidget(createSettingsPage(page_stack_));
-    parking_zone_editor_ = new ParkingZoneEditor(playback_api_, page_stack_);
+    parking_zone_editor_ = new ParkingZoneEditor(playback_api_, stm_api_, page_stack_);
     page_stack_->addWidget(parking_zone_editor_);
     content_layout->addWidget(page_stack_, 1);
     body_layout->addWidget(content, 1);
@@ -926,6 +937,17 @@ QWidget *MainWindow::createLivePage(QWidget *parent) {
     events_layout->setContentsMargins(14, 14, 14, 14);
     events_layout->setSpacing(10);
     events_layout->addWidget(makeSectionTitle("실시간 이벤트", events));
+
+    // 고정 영역 — live_events_scroll_ 바깥에 둔다. 스크롤 안에 넣으면 내릴 때
+    // 같이 사라져 "상단 고정"이 성립하지 않는다(Q3-1).
+    live_events_pinned_container_ = new QWidget(events);
+    live_events_pinned_layout_ = new QVBoxLayout(live_events_pinned_container_);
+    live_events_pinned_layout_->setContentsMargins(0, 0, 0, 8);
+    live_events_pinned_layout_->setSpacing(8);
+    // 스크롤이 없는 고정 영역이라 트레일링 스트레치를 안 둔다 — syncEventCards()가
+    // 마지막 아이템이 spacer인지 직접 확인해 있으면/없으면 둘 다 처리한다.
+    live_events_pinned_container_->hide();
+    events_layout->addWidget(live_events_pinned_container_);
 
     live_events_scroll_ = new QScrollArea(events);
     live_events_scroll_->setWidgetResizable(true);
@@ -1583,7 +1605,8 @@ QWidget *MainWindow::createDevicesPage(QWidget *parent) {
     hierarchy_layout->setSpacing(10);
     hierarchy_layout->addWidget(makeSectionTitle("장치 계층", hierarchy));
     hierarchy_layout->addWidget(makeMutedLabel("사이트 → 충전 구역 → CCTV + STM32 구역 제어기 → 센서·방재판·스프링클러·충전 스테이션", hierarchy));
-    hierarchy_layout->addWidget(createEmptyState("등록된 제어기가 없습니다", "Pi 장치 API 연결 후 STM32 상세에서 하위 센서와 actuator를 확인합니다.", hierarchy), 1);
+    stm_device_list_widget_ = new StmDeviceListWidget(stm_api_, hierarchy);
+    hierarchy_layout->addWidget(stm_device_list_widget_, 1);
     layout->addWidget(hierarchy, 1);
     return page;
 }
@@ -1714,22 +1737,6 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
     layout->addStretch(1);
     scroll->setWidget(page);
     return scroll;
-}
-
-QWidget *MainWindow::createEmptyState(const QString &title, const QString &description, QWidget *parent) const {
-    auto *host = new QWidget(parent);
-    auto *layout = new QVBoxLayout(host);
-    layout->setContentsMargins(18, 18, 18, 18);
-    layout->setAlignment(Qt::AlignCenter);
-    auto *title_label = new QLabel(title, host);
-    title_label->setProperty("emptyTitle", true);
-    title_label->setAlignment(Qt::AlignCenter);
-    auto *description_label = makeMutedLabel(description, host);
-    description_label->setAlignment(Qt::AlignCenter);
-    description_label->setMaximumWidth(520);
-    layout->addWidget(title_label);
-    layout->addWidget(description_label);
-    return host;
 }
 
 QFrame *MainWindow::createSummaryCard(const QString &title,
@@ -1933,6 +1940,12 @@ void MainWindow::setCurrentPage(int page_index) {
         return;
     }
     const int previous_page = page_stack_->currentIndex();
+    if (previous_page == 3 && page_index != 3 && stm_device_list_widget_) {
+        stm_device_list_widget_->stopPolling();
+    }
+    if (page_index == 3 && previous_page != 3 && stm_device_list_widget_) {
+        stm_device_list_widget_->startPolling();
+    }
     if (parking_zone_editor_ &&
         page_stack_->currentWidget() == parking_zone_editor_ &&
         !parking_zone_editor_->confirmDiscard(this)) {
@@ -4071,53 +4084,108 @@ void MainWindow::prependEventRow(const ParkingEventItem &item) {
 
 
 void MainWindow::updateLiveEventsPanel() {
-    if (!live_events_card_layout_ || !live_events_container_ || !event_store_) return;
+    if (!event_store_) return;
 
-    const QVector<ParkingEventItem> recents = event_store_->recentEvents(15);
-    if (recents.isEmpty()) return;
+    // 고정 판정: event_type을 반드시 봐야 한다 — stage1/2_state_changed도
+    // 항상 CRITICAL이라(§2.9) severity만으로 거르면 진압 진행 상태 변화까지
+    // 전부 상단에 고정된다. 결정 4에 따라 fire_cleared는 고정을 풀지 않는다
+    // (ignored_critical_ids_에 넣는 것은 [무시] 클릭뿐).
+    const QVector<ParkingEventItem> &all = event_store_->allEvents();
+    QVector<ParkingEventItem> pinned;
+    QSet<quint64> pinned_ids;
+    for (int i = all.size() - 1; i >= 0; --i) {  // 최신이 위로
+        const ParkingEventItem &item = all[i];
+        if (item.source_type == QStringLiteral("stm") && item.event_type == QStringLiteral("stm.fire_started") &&
+            item.severity == EventSeverity::Critical && !ignored_critical_ids_.contains(item.event_id)) {
+            pinned.append(item);
+            pinned_ids.insert(item.event_id);
+        }
+    }
 
-    live_events_container_->setUpdatesEnabled(false);
+    // 일반 영역에서는 고정된 것을 제외한다 — 같은 카드가 화면에 두 번 보이지
+    // 않게 한다(Q3-5 확정).
+    QVector<ParkingEventItem> general;
+    for (const ParkingEventItem &item : event_store_->recentEvents(15)) {
+        if (!pinned_ids.contains(item.event_id)) {
+            general.append(item);
+        }
+    }
 
-    // 기존 카드 위젯 리스트 수집
+    if (live_events_pinned_container_) {
+        live_events_pinned_container_->setVisible(!pinned.isEmpty());
+    }
+    syncEventCards(live_events_pinned_layout_, live_events_pinned_container_, pinned);
+    syncEventCards(live_events_card_layout_, live_events_container_, general);
+}
+
+void MainWindow::syncEventCards(QVBoxLayout *layout, QWidget *container, const QVector<ParkingEventItem> &items) {
+    if (!layout || !container) return;
+
+    container->setUpdatesEnabled(false);
+
+    // 기존 카드 위젯 리스트 수집 (트레일링 spacer는 건드리지 않는다)
     QList<ParkingEventCardWidget*> existingCards;
-    for (int i = 0; i < live_events_card_layout_->count(); ++i) {
-        auto *w = qobject_cast<ParkingEventCardWidget *>(live_events_card_layout_->itemAt(i)->widget());
+    for (int i = 0; i < layout->count(); ++i) {
+        auto *w = qobject_cast<ParkingEventCardWidget *>(layout->itemAt(i)->widget());
         if (w) {
             existingCards.append(w);
         } else {
-            auto *item = live_events_card_layout_->itemAt(i);
+            auto *item = layout->itemAt(i);
             if (item && item->widget()) {
                 item->widget()->deleteLater();
             }
         }
     }
 
+    // 마지막 아이템이 addStretch()로 만든 spacer면 그 앞에 삽입한다
+    // (일반 목록 스크롤 영역용). 고정 영역처럼 spacer가 없으면 그냥 끝에 붙인다.
+    auto insertPosition = [layout]() {
+        if (layout->count() > 0 && layout->itemAt(layout->count() - 1)->spacerItem()) {
+            return layout->count() - 1;
+        }
+        return layout->count();
+    };
+
     // 1. 필요한 개수보다 모자라면 카드 추가
-    while (existingCards.size() < recents.size()) {
-        auto *card = new ParkingEventCardWidget(recents[existingCards.size()], live_events_container_);
+    while (existingCards.size() < items.size()) {
+        auto *card = new ParkingEventCardWidget(items[existingCards.size()], container);
         connect(card, &ParkingEventCardWidget::actionTriggered, this,
-                [this](const QString &action, const ParkingEventItem &ev) {
-                    if (action == QStringLiteral("open_response_screen")) {
-                        qInfo().noquote() << QString("[event-action] open_response_screen event_id=%1").arg(ev.event_id);
-                    }
-                });
-        int insertPos = qMax(0, live_events_card_layout_->count() - 1);
-        live_events_card_layout_->insertWidget(insertPos, card);
+                [this](const QString &action, const ParkingEventItem &ev) { handleEventCardAction(action, ev); });
+        layout->insertWidget(insertPosition(), card);
         existingCards.append(card);
     }
 
     // 2. 필요한 개수보다 많으면 초과분 제거
-    while (existingCards.size() > recents.size()) {
+    while (existingCards.size() > items.size()) {
         auto *card = existingCards.takeLast();
         card->deleteLater();
     }
 
     // 3. 위젯 삭제/생성 없이 1:1로 내용만 갱신 (무깜빡임)
-    for (int i = 0; i < recents.size(); ++i) {
-        existingCards[i]->updateEvent(recents[i]);
+    for (int i = 0; i < items.size(); ++i) {
+        existingCards[i]->updateEvent(items[i]);
     }
 
-    live_events_container_->setUpdatesEnabled(true);
+    container->setUpdatesEnabled(true);
+}
+
+void MainWindow::handleEventCardAction(const QString &action, const ParkingEventItem &event) {
+    if (action != QStringLiteral("open_response_screen")) return;
+
+    if (event.source_type != QStringLiteral("stm") || event.event_type != QStringLiteral("stm.fire_started")) {
+        // 카메라 쪽 기존 동작(§critical) — Q3 범위 밖이라 로그만 남긴다.
+        qInfo().noquote() << QString("[event-action] open_response_screen event_id=%1").arg(event.event_id);
+        return;
+    }
+
+    // event를 값으로 넘긴다 — exec() 동안 패널이 갱신되면 클릭된 카드
+    // 위젯이 지워질 수 있어, 참조로 들고 있으면 dangling이 된다.
+    StmFireResponseDialog dialog(event, stm_api_, event_store_, this);
+    dialog.exec();
+    if (dialog.ignoreRequested()) {
+        ignored_critical_ids_.insert(event.event_id);
+        updateLiveEventsPanel();
+    }
 }
 
 void MainWindow::refreshEventsTable() {

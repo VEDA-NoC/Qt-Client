@@ -1,6 +1,7 @@
 #pragma once
 
 #include "parking_types.h"
+#include "stm_types.h"
 
 #include <QImage>
 #include <QWidget>
@@ -14,12 +15,13 @@ class QPushButton;
 class QTimer;
 class ParkingZoneCanvas;
 class PlaybackApiClient;
+class StmApiClient;
 
 class ParkingZoneEditor : public QWidget {
     Q_OBJECT
 
 public:
-    explicit ParkingZoneEditor(PlaybackApiClient *api, QWidget *parent = nullptr);
+    explicit ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_api, QWidget *parent = nullptr);
     void setReferenceImage(int channel_id, const QImage &reference_image);
     void openChannel(int channel_id, const QImage &reference_image);
     bool isDirty() const;
@@ -46,14 +48,16 @@ private:
     void pushHistory();
     void undo();
     void redo();
+    void rebuildDeviceCombo();
 
     PlaybackApiClient *api_ = nullptr;
+    StmApiClient *stm_api_ = nullptr;
     ParkingZoneCanvas *canvas_ = nullptr;
     QListWidget *space_list_ = nullptr;
     QLineEdit *label_edit_ = nullptr;
     QComboBox *type_combo_ = nullptr;
     QCheckBox *enabled_check_ = nullptr;
-    QLineEdit *device_uid_edit_ = nullptr;
+    QComboBox *device_combo_ = nullptr;
     QLineEdit *sensor_zone_edit_ = nullptr;
     QLineEdit *geometry_edit_ = nullptr;
     QLabel *geometry_label_ = nullptr;
@@ -69,6 +73,8 @@ private:
     QString draft_id_;
     QString geometry_id_;
     QString active_job_id_;
+    QVector<StmDevice> known_devices_;
+    bool devices_available_ = false;
     int channel_id_ = 1;
     int active_version_ = 0;
     int draft_version_ = 0;

@@ -47,6 +47,9 @@ qt_add_executable(qt_4ch_viewer
     playback_api_client.h
     playback_types.h
     parking_types.h
+    stm_types.h
+    stm_api_client.cpp
+    stm_api_client.h
     parking_event_types.h
     parking_event_api_client.cpp
     parking_event_api_client.h
@@ -54,6 +57,10 @@ qt_add_executable(qt_4ch_viewer
     parking_event_store.h
     parking_event_card_widget.cpp
     parking_event_card_widget.h
+    stm_fire_response_dialog.cpp
+    stm_fire_response_dialog.h
+    stm_device_list_widget.cpp
+    stm_device_list_widget.h
     parking_zone_canvas.cpp
     parking_zone_canvas.h
     parking_zone_editor.cpp
