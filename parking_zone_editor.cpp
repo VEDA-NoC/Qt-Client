@@ -2,6 +2,7 @@
 
 #include "parking_zone_canvas.h"
 #include "playback_api_client.h"
+#include "stm_api_client.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -13,6 +14,8 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSet>
+#include <QStandardItemModel>
 #include <QStyle>
 #include <QStringList>
 #include <QTimer>
@@ -28,8 +31,8 @@ QFrame *card(QWidget *parent) {
 }
 }
 
-ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, QWidget *parent)
-    : QWidget(parent), api_(api), job_poll_timer_(new QTimer(this)) {
+ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_api, QWidget *parent)
+    : QWidget(parent), api_(api), stm_api_(stm_api), job_poll_timer_(new QTimer(this)) {
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(20, 16, 20, 16);
     root->setSpacing(12);
@@ -94,21 +97,22 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, QWidget *parent)
     type_combo_->addItem("일반", "general");
     type_combo_->addItem("전기차 전용", "ev_only");
     enabled_check_ = new QCheckBox("활성", inspector);
-    device_uid_edit_ = new QLineEdit(inspector);
+    device_combo_ = new QComboBox(inspector);
     sensor_zone_edit_ = new QLineEdit(inspector);
     geometry_edit_ = new QLineEdit(inspector);
-    device_uid_edit_->setPlaceholderText("STM device_uid");
     sensor_zone_edit_->setPlaceholderText("sensor_zone_id");
     geometry_edit_->setPlaceholderText("카메라 기준 geometry_id");
     form->addRow("Geometry ID", geometry_edit_);
     form->addRow("이름", label_edit_);
     form->addRow("유형", type_combo_);
     form->addRow("상태", enabled_check_);
-    form->addRow("STM 장치", device_uid_edit_);
+    form->addRow("STM 장치", device_combo_);
     form->addRow("센서 구역", sensor_zone_edit_);
     inspector_layout->addLayout(form);
     auto *mapping_note = new QLabel(
-        "장치 목록 API가 아직 없어 STM 식별자는 계약 원문 값으로 입력합니다.", inspector);
+        "STM 장치는 목록에서 선택합니다. 다른 구역에 이미 연결된 장치는 선택할 수 "
+        "없습니다. 전기차 전용 구역에 장치를 연결하지 않으면 온도·화재 감지가 되지 않습니다.",
+        inspector);
     mapping_note->setWordWrap(true);
     mapping_note->setProperty("muted", true);
     inspector_layout->addWidget(mapping_note);
@@ -160,7 +164,7 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, QWidget *parent)
         }
     };
     connect(label_edit_, &QLineEdit::textEdited, this, edited);
-    connect(device_uid_edit_, &QLineEdit::textEdited, this, edited);
+    connect(device_combo_, &QComboBox::currentIndexChanged, this, edited);
     connect(sensor_zone_edit_, &QLineEdit::textEdited, this, edited);
     connect(geometry_edit_, &QLineEdit::textEdited, this, [this](const QString &text) {
         if (loading_controls_) return;
@@ -216,6 +220,18 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, QWidget *parent)
     });
     connect(api_, &PlaybackApiClient::parkingApplyJobReceived,
             this, &ParkingZoneEditor::handleApplyJob);
+    connect(stm_api_, &StmApiClient::devicesReceived, this, [this](const QVector<StmDevice> &devices) {
+        known_devices_ = devices;
+        devices_available_ = true;
+        refreshUi();
+    });
+    connect(stm_api_, &StmApiClient::requestFailed, this,
+            [this](const QString &operation, const QString &message, int) {
+        if (operation != QStringLiteral("stm.devices")) return;
+        devices_available_ = false;
+        setFeedback(QString("STM 장치 목록을 불러오지 못했습니다: %1").arg(message), "warning");
+        refreshUi();
+    });
     connect(api_, &PlaybackApiClient::requestFailed, this,
             [this](const QString &operation, const QString &message, int status) {
         if (!operation.startsWith("parking.")) return;
@@ -248,6 +264,7 @@ void ParkingZoneEditor::openChannel(int channel_id, const QImage &image) {
         canvas_->setReferenceImage(reference_images_[channel_id - 1]);
         setFeedback("Pi에서 활성 구역을 불러오는 중입니다.", "info");
         api_->requestParkingSpaces(channel_id_);
+        stm_api_->fetchDevices();
     } else {
         selectChannel(channel_id);
     }
@@ -298,6 +315,7 @@ void ParkingZoneEditor::selectChannel(int channel_id) {
     refreshUi();
     setFeedback("Pi에서 활성 구역을 불러오는 중입니다.", "info");
     api_->requestParkingSpaces(channel_id_);
+    stm_api_->fetchDevices();
 }
 
 void ParkingZoneEditor::loadSelection() {
@@ -306,18 +324,19 @@ void ParkingZoneEditor::loadSelection() {
     label_edit_->setEnabled(available);
     type_combo_->setEnabled(available);
     enabled_check_->setEnabled(available);
-    device_uid_edit_->setEnabled(available);
+    device_combo_->setEnabled(available && devices_available_);
     sensor_zone_edit_->setEnabled(available);
     if (available) {
         const ParkingSpace &space = spaces_[selected_index_];
         label_edit_->setText(space.label);
         type_combo_->setCurrentIndex(qMax(0, type_combo_->findData(space.space_type)));
         enabled_check_->setChecked(space.enabled);
-        device_uid_edit_->setText(space.stm_mapping.device_uid);
         sensor_zone_edit_->setText(space.stm_mapping.sensor_zone_id);
     } else {
-        label_edit_->clear(); device_uid_edit_->clear(); sensor_zone_edit_->clear();
+        label_edit_->clear();
+        sensor_zone_edit_->clear();
     }
+    rebuildDeviceCombo();
     geometry_edit_->setText(geometry_id_);
     loading_controls_ = false;
 }
@@ -328,9 +347,53 @@ void ParkingZoneEditor::storeSelection() {
     space.label = label_edit_->text().trimmed();
     space.space_type = type_combo_->currentData().toString();
     space.enabled = enabled_check_->isChecked();
-    space.stm_mapping.device_uid = device_uid_edit_->text().trimmed();
+    space.stm_mapping.device_uid = device_combo_->currentData().toString();
     space.stm_mapping.sensor_zone_id = sensor_zone_edit_->text().trimmed();
     if (auto *item = space_list_->item(selected_index_)) item->setText(space.label);
+}
+
+void ParkingZoneEditor::rebuildDeviceCombo() {
+    // 현재 선택된 구역의 매핑을 기준으로 다시 그린다 — 콤보 자체의 이전 선택을
+    // 보존하는 게 아니라, 구역이 바뀔 때마다 그 구역의 실제 매핑을 반영해야 한다.
+    const bool has_selection = selected_index_ >= 0 && selected_index_ < spaces_.size();
+    const QString target_uid = has_selection ? spaces_[selected_index_].stm_mapping.device_uid : QString();
+
+    device_combo_->blockSignals(true);
+    device_combo_->clear();
+    device_combo_->addItem("(연결 안 함)", QString());
+
+    QSet<QString> known_uids;
+    for (const StmDevice &device : known_devices_) {
+        known_uids.insert(device.device_uid);
+        QString text = QString("slave %1 · %2").arg(device.slave_address).arg(device.device_uid.left(12));
+        bool disabled = false;
+        if (device.registration.registered) {
+            const bool is_current_space = has_selection && device.registration.channel_id == channel_id_ &&
+                                          device.registration.space_id == spaces_[selected_index_].space_id;
+            if (!is_current_space) {
+                const QString where = device.registration.space_label.isEmpty() ? device.registration.space_id
+                                                                                 : device.registration.space_label;
+                text += QString(" (CH%1 · %2에 등록됨)").arg(device.registration.channel_id).arg(where);
+                disabled = true;
+            }
+        }
+        device_combo_->addItem(text, device.device_uid);
+        if (disabled) {
+            if (auto *model = qobject_cast<QStandardItemModel *>(device_combo_->model())) {
+                if (auto *item = model->item(device_combo_->count() - 1)) item->setEnabled(false);
+            }
+        }
+    }
+
+    // 활성 config엔 있지만(목록에는 없는) device_uid는 그대로 살려 둔다 —
+    // 안 그러면 콤보가 "(연결 안 함)"으로 튀면서 저장 시 매핑이 조용히 날아간다.
+    if (!target_uid.isEmpty() && !known_uids.contains(target_uid)) {
+        device_combo_->addItem(QString("%1 (오프라인)").arg(target_uid.left(12)), target_uid);
+    }
+
+    const int index = device_combo_->findData(target_uid);
+    device_combo_->setCurrentIndex(index >= 0 ? index : 0);
+    device_combo_->blockSignals(false);
 }
 
 void ParkingZoneEditor::refreshUi() {
@@ -419,12 +482,14 @@ void ParkingZoneEditor::redo() {
 }
 
 bool ParkingZoneEditor::locallyValid(QString *message) const {
+    // 서버(parking_space.cpp:255)도 stm_device_uid를 필수로 요구하지 않는다
+    // (allow_empty=true) — Qt가 서버보다 엄격할 이유가 없다(Q4 확정 결정).
+    // 장치 없는 전기차 전용 구역은 온도·화재 감지가 안 된다는 주의만
+    // mapping_note로 안내한다.
     if (spaces_.isEmpty()) { *message = "구역을 하나 이상 추가하세요."; return false; }
     for (const ParkingSpace &space : spaces_) {
-        if (space.label.trimmed().isEmpty() || space.polygon.size() != 4 ||
-            space.stm_mapping.device_uid.isEmpty() ||
-            space.stm_mapping.sensor_zone_id.isEmpty()) {
-            *message = "모든 구역에 이름, 4개 점, STM 장치와 센서 구역이 필요합니다.";
+        if (space.label.trimmed().isEmpty() || space.polygon.size() != 4) {
+            *message = "모든 구역에 이름과 4개 점이 필요합니다.";
             return false;
         }
     }

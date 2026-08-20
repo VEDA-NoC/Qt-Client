@@ -30,6 +30,18 @@ struct ParkingEventPayload {
     QString ev;                  // "yes", "no", "unknown"
 };
 
+// source_type == "stm"인 이벤트의 payload. rtsps stm_event_bridge.cpp의
+// stm_event_payload_json()이 채우는 필드(space_label 제외 — 그건 두 소스가
+// 공유하는 ParkingEventPayload::space_label로 이미 파싱된다)와 1:1 대응한다.
+struct StmEventPayload {
+    double temperature_c{0.0};   // FIRE_STARTED/CLEARED에서만 유효
+    bool occupied{false};        // OCCUPANCY_CHANGED에서만 유효
+    int distance_mm{0};          // OCCUPANCY_CHANGED에서만 유효
+    int actuator_status{0};      // STAGE1/2_STATE_CHANGED에서만 유효 (STM_ACTUATOR_*)
+    int origin{0};               // STAGE1/2_STATE_CHANGED: 0=local, 1=remote
+    int slave_address{0};
+};
+
 struct ParkingEventItem {
     quint64 event_id{0};
     QString event_type;
@@ -44,6 +56,7 @@ struct ParkingEventItem {
     EventSeverity severity{EventSeverity::Info};
     QString correlation_id;
     ParkingEventPayload payload;
+    StmEventPayload stm_payload;  // source_type != "stm"이면 기본값 그대로
     bool acked{false};            // 운영자 확인 여부 (Qt 로컬 상태)
 
     static EventSeverity parseSeverity(const QString &str) {
@@ -90,6 +103,15 @@ struct ParkingEventItem {
             item.payload.violation_reason = pObj.value(QStringLiteral("violation_reason")).toString();
             item.payload.plate = pObj.value(QStringLiteral("plate")).toString();
             item.payload.ev = pObj.value(QStringLiteral("ev")).toString();
+
+            if (item.source_type == QStringLiteral("stm")) {
+                item.stm_payload.temperature_c = pObj.value(QStringLiteral("temperature_c")).toDouble();
+                item.stm_payload.occupied = pObj.value(QStringLiteral("occupied")).toBool();
+                item.stm_payload.distance_mm = pObj.value(QStringLiteral("distance_mm")).toInt();
+                item.stm_payload.actuator_status = pObj.value(QStringLiteral("actuator_status")).toInt();
+                item.stm_payload.origin = pObj.value(QStringLiteral("origin")).toInt();
+                item.stm_payload.slave_address = pObj.value(QStringLiteral("slave_address")).toInt();
+            }
         }
         return item;
     }

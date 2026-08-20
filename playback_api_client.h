@@ -34,6 +34,7 @@ public:
     QUrl controlBaseUrl() const { return control_base_url_; }
     QString accessToken() const { return QString::fromUtf8(access_token_); }
     QSslConfiguration sslConfiguration() const { return ssl_configuration_; }
+    QByteArray pinnedCertificateSha256() const { return pinned_certificate_sha256_; }
 
     void login();
     void requestStatus();

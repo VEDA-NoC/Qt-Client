@@ -118,7 +118,9 @@ void ParkingEventApiClient::handlePollReplyFinished() {
     QJsonObject rootObj = doc.object();
     ParkingEventBatch batch;
     batch.schema_version = rootObj.value(QStringLiteral("schema_version")).toInt(1);
-    batch.server_time_utc_ms = static_cast<quint64>(rootObj.value(QStringLiteral("server_time_utc_ms")).toVariant().toULongLong());
+    // Pi는 이 필드를 "server_utc_ms"로 내보낸다 (control_server.cpp:626).
+    // 이전 키 이름("server_time_utc_ms")으로는 항상 0이 읽혔다.
+    batch.server_time_utc_ms = static_cast<quint64>(rootObj.value(QStringLiteral("server_utc_ms")).toVariant().toULongLong());
     batch.next_after_id = static_cast<quint64>(rootObj.value(QStringLiteral("next_after_id")).toVariant().toULongLong());
 
     if (rootObj.contains(QStringLiteral("events")) && rootObj.value(QStringLiteral("events")).isArray()) {
