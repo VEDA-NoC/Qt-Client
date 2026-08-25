@@ -14,6 +14,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSet>
 #include <QStandardItemModel>
 #include <QStyle>
@@ -28,6 +29,15 @@ QFrame *card(QWidget *parent) {
     result->setProperty("card", true);
     result->setFrameShape(QFrame::StyledPanel);
     return result;
+}
+
+// Pi가 STM identity에서 만드는 device_uid는 항상 uid_to_hex()의
+// "%08x%08x%08x" 포맷이라 정확히 24자 hex다(rtsps/stm_registers.cpp). 이
+// 형식이 아니면 실제 장치에서 온 값일 수 없다 — 잘못 입력/저장된 값을
+// "지금 응답 없는 정상 장치"와 구분하는 유일한 근거로 쓴다.
+bool looksLikeStmDeviceUid(const QString &uid) {
+    static const QRegularExpression pattern(QStringLiteral("^[0-9a-fA-F]{24}$"));
+    return pattern.match(uid).hasMatch();
 }
 }
 
@@ -387,8 +397,14 @@ void ParkingZoneEditor::rebuildDeviceCombo() {
 
     // 활성 config엔 있지만(목록에는 없는) device_uid는 그대로 살려 둔다 —
     // 안 그러면 콤보가 "(연결 안 함)"으로 튀면서 저장 시 매핑이 조용히 날아간다.
+    // 다만 "지금 응답이 없을 뿐인 정상 장치"와 "애초에 형식부터 잘못된 값"은
+    // 표시를 구분한다 — 둘 다 "(오프라인)"으로 뭉뚱그리면 후자(예: "1")가
+    // 영원히 매칭 안 되는데도 곧 복구될 것처럼 보인다.
     if (!target_uid.isEmpty() && !known_uids.contains(target_uid)) {
-        device_combo_->addItem(QString("%1 (오프라인)").arg(target_uid.left(12)), target_uid);
+        const QString label = looksLikeStmDeviceUid(target_uid)
+            ? QString("%1… (현재 응답 없음)").arg(target_uid.left(12))
+            : QString("\"%1\" · 잘못된 장치 ID").arg(target_uid);
+        device_combo_->addItem(label, target_uid);
     }
 
     const int index = device_combo_->findData(target_uid);
@@ -413,9 +429,53 @@ void ParkingZoneEditor::refreshUi() {
     loadSelection();
     QString local_message;
     const bool local_valid = locallyValid(&local_message);
-    save_button_->setEnabled(dirty_ && !geometry_id_.isEmpty() && local_valid);
-    validate_button_->setEnabled(!dirty_ && !draft_id_.isEmpty());
-    apply_button_->setEnabled(!dirty_ && !draft_id_.isEmpty() && validated_ && active_job_id_.isEmpty());
+
+    const bool save_enabled = dirty_ && !geometry_id_.isEmpty() && local_valid;
+    save_button_->setEnabled(save_enabled);
+    if (save_enabled) {
+        save_button_->setToolTip(QString());
+    } else if (!dirty_) {
+        save_button_->setToolTip(QStringLiteral("변경한 내용이 없습니다."));
+    } else if (geometry_id_.isEmpty()) {
+        save_button_->setToolTip(QStringLiteral("카메라 기준 Geometry ID가 필요합니다."));
+    } else {
+        save_button_->setToolTip(local_message);
+    }
+
+    const bool validate_enabled = !dirty_ && !draft_id_.isEmpty();
+    validate_button_->setEnabled(validate_enabled);
+    if (validate_enabled) {
+        validate_button_->setToolTip(QString());
+    } else if (dirty_) {
+        validate_button_->setToolTip(QStringLiteral("저장하지 않은 변경이 있습니다. 먼저 Draft를 저장하세요."));
+    } else {
+        validate_button_->setToolTip(QStringLiteral("먼저 Draft를 저장해야 검증할 수 있습니다."));
+    }
+
+    const bool apply_enabled = !dirty_ && !draft_id_.isEmpty() && validated_ && active_job_id_.isEmpty();
+    apply_button_->setEnabled(apply_enabled);
+    if (apply_enabled) {
+        apply_button_->setToolTip(QString());
+    } else if (!active_job_id_.isEmpty()) {
+        apply_button_->setToolTip(QStringLiteral("적용 작업이 진행 중입니다."));
+    } else if (dirty_ || draft_id_.isEmpty()) {
+        apply_button_->setToolTip(QStringLiteral("먼저 Draft를 저장하고 검증을 통과해야 합니다."));
+    } else {
+        apply_button_->setToolTip(QStringLiteral("먼저 검증을 통과해야 합니다."));
+    }
+
+    // 잘못된 형식의 STM 장치 ID는 항상 눈에 띄어야 한다 — 놓치면 화재 감지가
+    // 조용히 죽는다. 툴팁(마우스를 올려야 보임)이 아니라 feedback 라벨에 직접
+    // 표시한다.
+    if (selected_index_ >= 0 && selected_index_ < spaces_.size()) {
+        const QString mapped_uid = spaces_[selected_index_].stm_mapping.device_uid;
+        if (!mapped_uid.isEmpty() && !looksLikeStmDeviceUid(mapped_uid)) {
+            setFeedback(
+                QString("이 구역에 연결된 STM 장치 ID(\"%1\")가 올바르지 않습니다. 목록에서 실제 장치를 다시 선택하세요.")
+                    .arg(mapped_uid),
+                "warning");
+        }
+    }
 }
 
 void ParkingZoneEditor::setDirty(bool dirty) {

@@ -107,6 +107,7 @@ void apply(QApplication &application) {
         QPushButton:disabled { background: #F0F1F4; border-color: #E0E2E7; color: #A5A8B4; }
         QPushButton[primary="true"] { background: #F37321; border-color: #F37321; color: #FFFFFF; }
         QPushButton[primary="true"]:hover { background: #D85D10; border-color: #D85D10; color: #FFFFFF; }
+        QPushButton[primary="true"]:disabled { background: #F5C7A6; border-color: #F5C7A6; color: #FFFFFF; }
         QLineEdit, QComboBox, QDateEdit, QTimeEdit {
             background: #FFFFFF; border: 1px solid #CDD0D9; border-radius: 6px;
             min-height: 34px; padding: 0 10px;

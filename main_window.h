@@ -205,6 +205,11 @@ private:
     QWidget *live_events_pinned_container_ = nullptr;
     QVBoxLayout *live_events_pinned_layout_ = nullptr;
     QSet<quint64> ignored_critical_ids_;
+    // 로그인 시 이벤트 백로그가 다시 내려와도 "상단 고정"은 새 이벤트에만
+    // 걸리도록, 폴링 시작 후 첫 배치(백로그)의 최대 event_id를 기준선으로
+    // 잡는다. 그 이후 도착한(=id가 이보다 큰) CRITICAL 이벤트만 고정 대상.
+    quint64 pin_baseline_event_id_ = 0;
+    bool pin_baseline_established_ = false;
     QVBoxLayout *live_events_card_layout_ = nullptr;
     QScrollArea *live_events_scroll_ = nullptr;
     QWidget *live_events_container_ = nullptr;
