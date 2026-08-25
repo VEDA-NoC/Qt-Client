@@ -59,12 +59,10 @@ void StmDeviceListWidget::stopPolling() {
 }
 
 void StmDeviceListWidget::handleDevicesReceived(const QVector<StmDevice> &devices) {
-    registered_devices_.clear();
-    for (const StmDevice &device : devices) {
-        if (device.registration.registered) {
-            registered_devices_.append(device);
-        }
-    }
+    // 등록 여부로 거르지 않는다 — STM이 RS-485로 붙어 identity까지 읽혔지만
+    // 아직 어느 구역에도 매핑되지 않은 장치도 그대로 보여야, "장치가 아예 안
+    // 붙었다"와 "붙었는데 등록만 안 됐다"를 화면에서 구분할 수 있다.
+    all_devices_ = devices;
     error_label_->hide();
     rebuildRows();
 }
@@ -93,12 +91,12 @@ void StmDeviceListWidget::rebuildRows() {
         delete item;
     }
 
-    if (registered_devices_.isEmpty()) {
-        auto *title = new QLabel(QStringLiteral("등록된 충전 스테이션이 없습니다"), this);
+    if (all_devices_.isEmpty()) {
+        auto *title = new QLabel(QStringLiteral("연결된 STM 장치가 없습니다"), this);
         title->setAlignment(Qt::AlignCenter);
         title->setStyleSheet("font-weight: 600; color: #1D1E37;");
         auto *description = new QLabel(
-            QStringLiteral("설정 → 주차 구역 관리에서 구역에 STM 장치를 연결하세요"), this);
+            QStringLiteral("STM 보드 전원과 RS-485 배선을 확인하세요"), this);
         description->setAlignment(Qt::AlignCenter);
         description->setProperty("muted", true);
         rows_layout_->addWidget(title);
@@ -106,16 +104,24 @@ void StmDeviceListWidget::rebuildRows() {
         return;
     }
 
-    for (const StmDevice &device : registered_devices_) {
+    for (const StmDevice &device : all_devices_) {
         auto *row = new QWidget(this);
         auto *row_layout = new QHBoxLayout(row);
         row_layout->setContentsMargins(0, 0, 0, 0);
 
         const QString device_uid = device.device_uid;
-        const QString display_name =
-            device.registration.space_label.isEmpty() ? device.registration.space_id : device.registration.space_label;
+        const bool registered = device.registration.registered;
+        const QString display_name = !registered ? QStringLiteral("미등록 STM 장치")
+                                     : device.registration.space_label.isEmpty()
+                                         ? device.registration.space_id
+                                         : device.registration.space_label;
 
         auto *unregister_button = new QPushButton(QStringLiteral("등록 해제"), row);
+        unregister_button->setEnabled(registered);
+        if (!registered) {
+            unregister_button->setToolTip(
+                QStringLiteral("등록된 장치만 해제할 수 있습니다. 이 화면의 주차 구역 관리에서 구역에 연결하세요."));
+        }
         connect(unregister_button, &QPushButton::clicked, this,
                 [this, device_uid, display_name]() { confirmUnregister(device_uid, display_name); });
         row_layout->addWidget(unregister_button);
@@ -128,15 +134,22 @@ void StmDeviceListWidget::rebuildRows() {
         // 진압 상태(방재포/펌프)는 별도 열이 아니라 보조 문구로만 덧붙인다
         // (요구 4의 열 구성을 바꾸지 않기 위함, Q4-b 확정).
         QString status_suffix;
-        if (device.state.available) {
+        if (registered && device.state.available) {
             if (device.state.stage1_status_name == QStringLiteral("running")) {
                 status_suffix = QStringLiteral(" · 방재포 전개됨");
             } else if (device.state.stage2_status_name == QStringLiteral("running")) {
                 status_suffix = QStringLiteral(" · 살수 중");
             }
         }
-        auto *subtitle_label = new QLabel(
-            QStringLiteral("slave %1 · %2%3").arg(device.slave_address).arg(device_uid.left(12), status_suffix), row);
+        const QString subtitle_text = registered
+            ? QString("CH%1 · slave %2 · %3%4")
+                  .arg(device.registration.channel_id)
+                  .arg(device.slave_address)
+                  .arg(device_uid.left(12), status_suffix)
+            : QString("slave %1 · %2 · 이 화면의 주차 구역 관리에서 연결 필요")
+                  .arg(device.slave_address)
+                  .arg(device_uid.left(12));
+        auto *subtitle_label = new QLabel(subtitle_text, row);
         subtitle_label->setProperty("muted", true);
         name_col->addWidget(name_label);
         name_col->addWidget(subtitle_label);

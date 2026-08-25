@@ -81,8 +81,8 @@ const QStringList kPageSubtitles = {
     "4채널 실시간 영상과 최근 이벤트를 확인합니다.",
     "이벤트 녹화 구간을 검색하고 재생합니다.",
     "발생·확인·해결 상태를 분리하여 관리합니다.",
-    "서버 저장소와 구역 제어기를 관리합니다.",
-    "연결, 녹화 정책, 구역 및 제품 정보를 관리합니다.",
+    "서버 저장소, 구역 제어기, 주차 구역·번호판·전기차 판정을 관리합니다.",
+    "연결, 녹화 정책, 제품 정보를 관리합니다.",
 };
 
 constexpr int kPlaybackApiActionNone = 0;
@@ -298,6 +298,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     // 네트워크 수신 -> 스토어 저장 (이 연결이 batchAdded를 간접 발생시킴)
     connect(event_api_client_, &ParkingEventApiClient::eventsReceived,
             this, [this](const ParkingEventBatch &batch) {
+                // 폴링 시작 후 처음 도착하는 배치가 백로그다. 그 배치가 갖고
+                // 있는 가장 큰 event_id를 기준선으로 잡아, 그보다 작거나
+                // 같은(=예전) 이벤트는 이후 상단 고정 판정에서 제외한다.
+                if (!pin_baseline_established_) {
+                    pin_baseline_event_id_ = batch.next_after_id;
+                    pin_baseline_established_ = true;
+                }
                 if (event_store_) event_store_->addEvents(batch.events);
             });
     // 배치 수신 완료 시 1회만 UI 갱신 (이벤트별 rebuild 방지)
@@ -371,6 +378,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                            .arg(expires_in_seconds);
                 if (event_api_client_ && playback_api_) {
                     event_api_client_->setSslConfiguration(playback_api_->sslConfiguration());
+                    pin_baseline_established_ = false;
+                    pin_baseline_event_id_ = 0;
                     event_api_client_->startPolling(playback_api_->controlBaseUrl().toString(), playback_api_->accessToken());
                 }
                 const int action = pending_playback_api_action_;
@@ -1599,11 +1608,24 @@ QWidget *MainWindow::createDevicesPage(QWidget *parent) {
     health_layout->addRow(system_reboot_notice_label_);
     layout->addWidget(health);
 
+    auto *zones = makeCard(page);
+    auto *zones_layout = new QVBoxLayout(zones);
+    zones_layout->setContentsMargins(18, 16, 18, 16);
+    zones_layout->addWidget(makeSectionTitle("주차 구역·번호판·전기차 판정", zones));
+    zones_layout->addWidget(makeMutedLabel("채널 영상 위에 4점 polygon을 지정하고 STM 센서 구역과 연결합니다. Draft 저장·검증·카메라 readback 적용은 각각 분리됩니다.", zones));
+    auto *parking_button = new QPushButton("주차 구역 관리 열기", zones);
+    parking_button->setProperty("primary", true);
+    parking_button->setMaximumWidth(180);
+    zones_layout->addWidget(parking_button, 0, Qt::AlignLeft);
+    connect(parking_button, &QPushButton::clicked,
+            this, &MainWindow::showParkingZoneEditor);
+    layout->addWidget(zones);
+
     auto *hierarchy = makeCard(page);
     auto *hierarchy_layout = new QVBoxLayout(hierarchy);
     hierarchy_layout->setContentsMargins(18, 16, 18, 16);
     hierarchy_layout->setSpacing(10);
-    hierarchy_layout->addWidget(makeSectionTitle("장치 계층", hierarchy));
+    hierarchy_layout->addWidget(makeSectionTitle("충전 스테이션 관리", hierarchy));
     hierarchy_layout->addWidget(makeMutedLabel("사이트 → 충전 구역 → CCTV + STM32 구역 제어기 → 센서·방재판·스프링클러·충전 스테이션", hierarchy));
     stm_device_list_widget_ = new StmDeviceListWidget(stm_api_, hierarchy);
     hierarchy_layout->addWidget(stm_device_list_widget_, 1);
@@ -1714,19 +1736,6 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
     recording_layout->addRow("움직임 녹화", new QLabel("사전 5초 · 사후 10초 · 세그먼트 최대 약 60초", recording));
     recording_layout->addRow("설정 소유권", new QLabel("Pi config.get/config.update · revision 충돌 검출", recording));
     layout->addWidget(recording);
-
-    auto *zones = makeCard(page);
-    auto *zones_layout = new QVBoxLayout(zones);
-    zones_layout->setContentsMargins(18, 16, 18, 16);
-    zones_layout->addWidget(makeSectionTitle("주차 구역·번호판·전기차 판정", zones));
-    zones_layout->addWidget(makeMutedLabel("채널 영상 위에 4점 polygon을 지정하고 STM 센서 구역과 연결합니다. Draft 저장·검증·카메라 readback 적용은 각각 분리됩니다.", zones));
-    auto *parking_button = new QPushButton("주차 구역 관리 열기", zones);
-    parking_button->setProperty("primary", true);
-    parking_button->setMaximumWidth(180);
-    zones_layout->addWidget(parking_button, 0, Qt::AlignLeft);
-    connect(parking_button, &QPushButton::clicked,
-            this, &MainWindow::showParkingZoneEditor);
-    layout->addWidget(zones);
 
     auto *legal = makeCard(page);
     auto *legal_layout = new QVBoxLayout(legal);
@@ -1949,7 +1958,7 @@ void MainWindow::setCurrentPage(int page_index) {
     if (parking_zone_editor_ &&
         page_stack_->currentWidget() == parking_zone_editor_ &&
         !parking_zone_editor_->confirmDiscard(this)) {
-        if (auto *button = navigation_group_->button(4)) button->setChecked(true);
+        if (auto *button = navigation_group_->button(3)) button->setChecked(true);
         return;
     }
     if (previous_page == 1 && page_index != 1 && playback_worker_) {
@@ -1982,16 +1991,17 @@ void MainWindow::showParkingZoneEditor() {
     }
     parking_zone_editor_->openChannel(1,
         panels_.isEmpty() ? QImage() : panels_.first()->currentImage());
+    if (stm_device_list_widget_) stm_device_list_widget_->stopPolling();
     page_stack_->setCurrentWidget(parking_zone_editor_);
     page_title_label_->setText("주차 구역 관리");
     page_subtitle_label_->setText("채널별 4점 구역과 STM 센서 매핑을 Draft로 검증하고 Pi에 적용합니다.");
     stream_controls_->setVisible(false);
-    if (auto *button = navigation_group_->button(4)) button->setChecked(true);
+    if (auto *button = navigation_group_->button(3)) button->setChecked(true);
 }
 
 void MainWindow::leaveParkingZoneEditor() {
     if (!parking_zone_editor_ || !parking_zone_editor_->confirmDiscard(this)) return;
-    setCurrentPage(4);
+    setCurrentPage(3);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
@@ -4089,14 +4099,16 @@ void MainWindow::updateLiveEventsPanel() {
     // 고정 판정: event_type을 반드시 봐야 한다 — stage1/2_state_changed도
     // 항상 CRITICAL이라(§2.9) severity만으로 거르면 진압 진행 상태 변화까지
     // 전부 상단에 고정된다. 결정 4에 따라 fire_cleared는 고정을 풀지 않는다
-    // (ignored_critical_ids_에 넣는 것은 [무시] 클릭뿐).
+    // (ignored_critical_ids_에 넣는 것은 [무시] 클릭뿐). pin_baseline_event_id_
+    // 이하는 로그인 시 다시 내려온 과거 이벤트이므로 고정 대상에서 제외한다.
     const QVector<ParkingEventItem> &all = event_store_->allEvents();
     QVector<ParkingEventItem> pinned;
     QSet<quint64> pinned_ids;
     for (int i = all.size() - 1; i >= 0; --i) {  // 최신이 위로
         const ParkingEventItem &item = all[i];
         if (item.source_type == QStringLiteral("stm") && item.event_type == QStringLiteral("stm.fire_started") &&
-            item.severity == EventSeverity::Critical && !ignored_critical_ids_.contains(item.event_id)) {
+            item.severity == EventSeverity::Critical && !ignored_critical_ids_.contains(item.event_id) &&
+            item.event_id > pin_baseline_event_id_) {
             pinned.append(item);
             pinned_ids.insert(item.event_id);
         }
