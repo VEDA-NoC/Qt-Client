@@ -142,7 +142,9 @@ LegalNoticeWidget::LegalNoticeWidget(QWidget *parent) : QWidget(parent) {
     addSectionSpacing(layout);
     layout->addWidget(makeTitle("핵심 고지", this));
     auto *summary_layout = new QFormLayout();
-    summary_layout->setContentsMargins(0, 0, 0, 0);
+    // 아래 "개인정보 처리 요약"/"운영 상세"/"정책·공식 출처" 절과 같은 들여쓰기
+    // (왼쪽 18px)를 써서 "핵심 고지" 제목 아래 하위 항목처럼 보이게 한다.
+    summary_layout->setContentsMargins(18, 6, 0, 0);
     summary_layout->setHorizontalSpacing(22);
     summary_layout->setVerticalSpacing(8);
     summary_layout->addRow(
@@ -236,7 +238,7 @@ LegalNoticeWidget::LegalNoticeWidget(QWidget *parent) : QWidget(parent) {
     addSectionSpacing(layout);
     layout->addWidget(makeTitle("오픈소스·제3자 라이선스", this));
     auto *license_layout = new QFormLayout();
-    license_layout->setContentsMargins(0, 0, 0, 0);
+    license_layout->setContentsMargins(18, 6, 0, 0);
     license_layout->setHorizontalSpacing(22);
     license_layout->addRow(
         "번들 글꼴",
@@ -245,7 +247,7 @@ LegalNoticeWidget::LegalNoticeWidget(QWidget *parent) : QWidget(parent) {
 
     addSectionSpacing(layout);
     auto *product_layout = new QFormLayout();
-    product_layout->setContentsMargins(0, 0, 0, 0);
+    product_layout->setContentsMargins(18, 6, 0, 0);
     product_layout->setHorizontalSpacing(22);
     const QString version = QCoreApplication::applicationVersion().isEmpty()
                                 ? "미지정"
