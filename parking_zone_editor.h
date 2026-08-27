@@ -8,6 +8,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QHideEvent;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -30,6 +31,9 @@ public:
 signals:
     void backRequested();
     void dirtyChanged(bool dirty);
+
+protected:
+    void hideEvent(QHideEvent *event) override;
 
 private:
     void selectChannel(int channel_id);
@@ -62,6 +66,7 @@ private:
     QLineEdit *geometry_edit_ = nullptr;
     QLabel *geometry_label_ = nullptr;
     QLabel *feedback_label_ = nullptr;
+    QLabel *device_status_label_ = nullptr;
     QPushButton *save_button_ = nullptr;
     QPushButton *validate_button_ = nullptr;
     QPushButton *apply_button_ = nullptr;
@@ -84,4 +89,5 @@ private:
     bool validated_ = false;
     bool job_request_in_flight_ = false;
     QTimer *job_poll_timer_ = nullptr;
+    QTimer *device_refresh_timer_ = nullptr;
 };

@@ -43,6 +43,10 @@ qt_add_executable(qt_4ch_viewer
     app_logging.h
     legal_notice_widget.cpp
     legal_notice_widget.h
+    login_page.cpp
+    login_page.h
+    signup_page.cpp
+    signup_page.h
     playback_api_client.cpp
     playback_api_client.h
     playback_types.h

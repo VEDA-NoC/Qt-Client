@@ -28,9 +28,16 @@ void ParkingEventApiClient::startPolling(const QString &baseUrl, const QString &
                             .arg(next_after_id_);
 
     if (current_reply_) {
-        current_reply_->abort();
-        current_reply_->deleteLater();
+        // abort()는 finished()를 동기적으로(재진입) 방출한다 —
+        // handlePollReplyFinished()가 이 함수 안에서 다시 불려 current_reply_를
+        // 먼저 null로 만들어버리면, 아래에서 이어서 쓰려던 포인터가 이미
+        // nullptr이라 널 역참조가 난다. 먼저 로컬로 빼내고 멤버를 비운
+        // 다음, 재진입을 막기 위해 시그널을 끊고 나서 정리한다.
+        QNetworkReply *reply = current_reply_;
         current_reply_ = nullptr;
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
     }
 
     sendNextLongPollRequest();
@@ -40,9 +47,12 @@ void ParkingEventApiClient::stopPolling() {
     polling_active_ = false;
     retry_timer_.stop();
     if (current_reply_) {
-        current_reply_->abort();
-        current_reply_->deleteLater();
+        // startPolling()과 동일한 이유로 로컬 변수를 거친다.
+        QNetworkReply *reply = current_reply_;
         current_reply_ = nullptr;
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
     }
 }
 

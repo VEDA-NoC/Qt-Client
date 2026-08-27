@@ -65,6 +65,18 @@ void apply(QApplication &application) {
         QToolButton[nav="true"]:checked {
             background: #303252; border-left-color: #F37321; color: #FFFFFF; font-weight: 600;
         }
+        QToolButton[sidebarAction="true"] {
+            background: #292B49; border: 1px solid #40436B; border-radius: 6px;
+            color: #E3E4EC; font-size: 9.5pt; font-weight: 600; min-height: 38px;
+            padding: 0 14px; text-align: center; margin: 4px 16px 0 16px;
+        }
+        QToolButton[sidebarAction="true"]:hover { background: #34365A; border-color: #52558A; }
+        QToolButton[sidebarAction="true"][critical="true"] {
+            background: transparent; border-color: #7A3A3E; color: #F2A1A6;
+        }
+        QToolButton[sidebarAction="true"][critical="true"]:hover {
+            background: #4A2529; border-color: #B42318; color: #FFFFFF;
+        }
         QToolButton[legalSectionToggle="true"] {
             background: #F7F7F9; border: 1px solid #E1E3E9; border-radius: 6px;
             color: #353968; font-weight: 600; min-height: 34px; padding: 0 10px;

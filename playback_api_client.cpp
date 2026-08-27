@@ -303,6 +303,18 @@ void PlaybackApiClient::clearSession() {
     token_expires_at_utc_ = {};
 }
 
+void PlaybackApiClient::deconfigure() {
+    clearSession();
+    configured_ = false;
+    control_base_url_ = QUrl();
+    username_.clear();
+    password_.fill(QChar('\0'));
+    password_.clear();
+    certificate_path_.clear();
+    ssl_configuration_ = QSslConfiguration();
+    pinned_certificate_sha256_.clear();
+}
+
 QUrl PlaybackApiClient::endpointUrl(const QString &path) const {
     QUrl url = control_base_url_;
     QString base_path = url.path();
