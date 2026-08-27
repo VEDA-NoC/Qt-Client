@@ -113,11 +113,12 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_a
     geometry_edit_ = new QLineEdit(inspector);
     sensor_zone_edit_->setPlaceholderText("sensor_zone_id");
     geometry_edit_->setPlaceholderText("카메라 기준 geometry_id");
-    form->addRow("Geometry ID", geometry_edit_);
+    form->addRow("주차 영역 ID", geometry_edit_);
     form->addRow("이름", label_edit_);
     form->addRow("유형", type_combo_);
     form->addRow("상태", enabled_check_);
-    form->addRow("STM 장치", device_combo_);
+    form->addRow("스테이션 지정", device_combo_);
+
     device_status_label_ = new QLabel(inspector);
     device_status_label_->setWordWrap(true);
     device_status_label_->setProperty("settingsFeedback", true);
@@ -127,7 +128,7 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_a
     form->addRow("센서 구역", sensor_zone_edit_);
     inspector_layout->addLayout(form);
     auto *mapping_note = new QLabel(
-        "STM 장치는 목록에서 선택합니다. 다른 구역에 이미 연결된 장치는 선택할 수 "
+        "스테이션을 목록에서 선택합니다. 다른 구역에 이미 연결된 장치는 선택할 수 "
         "없습니다. 전기차 전용 구역에 장치를 연결하지 않으면 온도·화재 감지가 되지 않습니다.",
         inspector);
     mapping_note->setWordWrap(true);
@@ -141,9 +142,9 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_a
     feedback_label_->setWordWrap(true);
     feedback_label_->setProperty("settingsFeedback", true);
     footer->addWidget(feedback_label_, 1);
-    save_button_ = new QPushButton("Draft 저장", this);
+    save_button_ = new QPushButton("저장", this);
     validate_button_ = new QPushButton("검증", this);
-    apply_button_ = new QPushButton("Pi에 적용", this);
+    apply_button_ = new QPushButton("적용", this);
     apply_button_->setProperty("primary", true);
     footer->addWidget(save_button_);
     footer->addWidget(validate_button_);

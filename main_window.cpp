@@ -1,6 +1,8 @@
 #include "main_window.h"
 
 #include "legal_notice_widget.h"
+#include "login_page.h"
+#include "signup_page.h"
 #include "playback_api_client.h"
 #include "parking_zone_editor.h"
 #include "parking_event_api_client.h"
@@ -365,7 +367,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             [this](qint64 expires_in_seconds) {
                 playback_login_in_progress_ = false;
                 playback_login_ever_succeeded_ = true;
-                control_password_edit_->clear();
+                // login_page_의 비밀번호는 일부러 지우지 않는다 — 실제
+                // 인증은 설정 탭의 "Control API 적용"에서만 일어나고, 그
+                // 버튼을 다시 눌러 재연결할 때도 같은 값을 읽어간다.
                 refreshPlaybackAuthUi(true);
                 if (control_feedback_label_) {
                     control_feedback_label_->setText(
@@ -732,8 +736,30 @@ void MainWindow::createUi() {
     bottom_bar_ = createBottomBar(central);
     root_layout->addWidget(bottom_bar_);
 
-    setCentralWidget(central);
     setWindowTitle("VEDA VMS Console");
+
+    // 로그인 전에는 사이드바·상단바를 포함한 central 전체를 가려야 진짜
+    // 로그인 화면이 된다 — page_stack_ 안이 아니라 그 바깥, central과
+    // 같은 층에 둔다.
+    login_page_ = new LoginPage(this);
+    signup_page_ = new SignupPage(this);
+    root_stack_ = new QStackedWidget(this);
+    root_stack_->addWidget(login_page_);  // index 0
+    root_stack_->addWidget(signup_page_); // index 1
+    root_stack_->addWidget(central);      // index 2
+    setCentralWidget(root_stack_);
+    root_stack_->setCurrentWidget(login_page_);
+
+    // 로그인 버튼은 실제 Control API 인증을 하지 않는다 — 그건 설정 탭의
+    // "Control API 적용"(URL·인증서·비밀번호를 함께 검증)에서만 일어난다.
+    // 여기서는 화면만 전환한다. 입력한 비밀번호는 login_page_ 안에 남아
+    // 있다가 나중에 그 버튼을 눌렀을 때 재사용된다.
+    connect(login_page_, &LoginPage::loginRequested, this,
+            [this]() { root_stack_->setCurrentIndex(2); });
+    connect(login_page_, &LoginPage::signupRequested, this,
+            [this]() { root_stack_->setCurrentWidget(signup_page_); });
+    connect(signup_page_, &SignupPage::backRequested, this,
+            [this]() { root_stack_->setCurrentWidget(login_page_); });
 
     connect(navigation_group_, &QButtonGroup::idClicked, this, &MainWindow::setCurrentPage);
     connect(start_button_, &QPushButton::clicked, this, &MainWindow::startStreams);
@@ -808,6 +834,25 @@ QWidget *MainWindow::createSidebar(QWidget *parent) {
     }
 
     layout->addStretch(1);
+
+    logout_button_ = new QToolButton(sidebar);
+    logout_button_->setText(QStringLiteral(" 로그아웃"));
+    logout_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    logout_button_->setProperty("sidebarAction", true);
+    logout_button_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    layout->addWidget(logout_button_);
+    connect(logout_button_, &QToolButton::clicked, this, &MainWindow::logout);
+
+    exit_button_ = new QToolButton(sidebar);
+    exit_button_->setText("종료");
+    exit_button_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    exit_button_->setProperty("sidebarAction", true);
+    exit_button_->setProperty("critical", true);
+    exit_button_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    layout->addWidget(exit_button_);
+    layout->addSpacing(4);
+    connect(exit_button_, &QToolButton::clicked, this, &QWidget::close);
+
     return sidebar;
 }
 
@@ -1218,8 +1263,7 @@ QWidget *MainWindow::createPlaybackPage(QWidget *parent) {
     viewer_layout->addLayout(player_controls);
 
     auto *shortcut_hint = makeMutedLabel(
-        "Space 재생/일시정지  ·  ←/→ 1초 이동  ·  F11 전체화면  ·  "
-        "배속/역재생은 Pi API 확장 후 제공",
+        "Space 재생/일시정지  ·  ←/→ 1초 이동  ·  F11 전체화면",
         viewer);
     shortcut_hint->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     viewer_layout->addWidget(shortcut_hint);
@@ -1643,10 +1687,16 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
     layout->setContentsMargins(18, 18, 18, 18);
     layout->setSpacing(12);
 
+    // Pi 실시간 RTSPS Base URL + Control HTTPS Base URL + 인증서를 한 카드로
+    // 합친다. "채널 URL 규칙" · "적용 상태" · "보안 경계" 행은 없앤다 — base
+    // URL 적용 결과 피드백은 아래 "연결 상태"(control_feedback_label_) 한
+    // 곳으로 합쳐서 보여준다(setBaseUrlFeedback() 참조).
     auto *connection = makeCard(page);
     auto *connection_layout = new QFormLayout(connection);
     connection_layout->setContentsMargins(18, 16, 18, 16);
     connection_layout->setHorizontalSpacing(18);
+    connection_layout->addRow(makeSectionTitle("URL 및 인증 관리", connection));
+
     base_url_edit_ = new QLineEdit(applied_base_url_, connection);
     base_url_edit_->setPlaceholderText("rtsps://server:8554");
     auto *base_url_row = new QWidget(connection);
@@ -1657,40 +1707,22 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
     base_url_apply_button_->setEnabled(false);
     base_url_layout->addWidget(base_url_edit_, 1);
     base_url_layout->addWidget(base_url_apply_button_);
-    connection_layout->addRow("Pi 실시간 RTSPS Base URL", base_url_row);
-    connection_layout->addRow("채널 URL 규칙", new QLabel("{base}/ch1 ... {base}/ch4", connection));
-    base_url_feedback_label_ = makeMutedLabel("현재 실행에 적용됨 · Pi 스트림 목록 API 구현 전 임시 설정", connection);
-    base_url_feedback_label_->setProperty("settingsFeedback", true);
-    base_url_feedback_label_->setProperty("severity", "ok");
-    connection_layout->addRow("적용 상태", base_url_feedback_label_);
-    connection_layout->addRow("보안 경계", makeMutedLabel("카메라 원본 RTSP URL과 계정정보는 Pi에서만 관리하며 Qt에는 저장하지 않습니다.", connection));
+    connection_layout->addRow("RTSPS Base URL", base_url_row);
     connect(base_url_apply_button_, &QPushButton::clicked, this, &MainWindow::applyBaseUrl);
     connect(base_url_edit_, &QLineEdit::returnPressed, this, &MainWindow::applyBaseUrl);
     connect(base_url_edit_, &QLineEdit::textChanged, this, [this]() {
         base_url_apply_button_->setEnabled(base_url_edit_->text().trimmed() != applied_base_url_);
         if (base_url_apply_button_->isEnabled()) {
             setBaseUrlFeedback("변경사항이 아직 적용되지 않았습니다.", "warning");
-        } else {
-            setBaseUrlFeedback("현재 실행에 적용됨 · Pi 스트림 목록 API 구현 전 임시 설정", "ok");
         }
     });
-    layout->addWidget(connection);
 
-    auto *control = makeCard(page);
-    auto *control_layout = new QFormLayout(control);
-    control_layout->setContentsMargins(18, 16, 18, 16);
-    control_layout->setHorizontalSpacing(18);
     control_base_url_edit_ =
-        new QLineEdit(defaultControlBaseUrl(applied_base_url_).toString(), control);
+        new QLineEdit(defaultControlBaseUrl(applied_base_url_).toString(), connection);
     control_base_url_edit_->setPlaceholderText("https://server:9443");
-    control_password_edit_ = new QLineEdit(control);
-    control_password_edit_->setEchoMode(QLineEdit::Password);
-    control_password_edit_->setPlaceholderText("operator control password");
-    control_certificate_path_ =
-        "C:/Users/shini/Documents/Codex/2026-07-10/server.crt";
-    control_certificate_edit_ =
-        new QLineEdit(control_certificate_path_, control);
-    auto *certificate_row = new QWidget(control);
+    control_certificate_edit_ = new QLineEdit(connection);
+    control_certificate_edit_->setPlaceholderText("Pi에서 받은 server.crt 경로");
+    auto *certificate_row = new QWidget(connection);
     auto *certificate_layout = new QHBoxLayout(certificate_row);
     certificate_layout->setContentsMargins(0, 0, 0, 0);
     certificate_layout->setSpacing(8);
@@ -1698,18 +1730,17 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
         new QPushButton("인증서 선택", certificate_row);
     certificate_layout->addWidget(control_certificate_edit_, 1);
     certificate_layout->addWidget(certificate_browse_button);
-    control_apply_button_ = new QPushButton("Control API 적용", control);
+    control_apply_button_ = new QPushButton("Control API 적용", connection);
     control_apply_button_->setProperty("primary", true);
     control_feedback_label_ =
         makeMutedLabel("비밀번호는 메모리에만 보관하며 server.crt와 IP/hostname SAN을 검증합니다.",
-                       control);
+                       connection);
     control_feedback_label_->setProperty("settingsFeedback", true);
-    control_layout->addRow("Pi Control HTTPS Base URL", control_base_url_edit_);
-    control_layout->addRow("사용자", new QLabel("operator", control));
-    control_layout->addRow("Control 비밀번호", control_password_edit_);
-    control_layout->addRow("신뢰할 server.crt", certificate_row);
-    control_layout->addRow("", control_apply_button_);
-    control_layout->addRow("연결 상태", control_feedback_label_);
+    connection_layout->addRow("HTTPS Base URL", control_base_url_edit_);
+    connection_layout->addRow("사용자", new QLabel("operator", connection));
+    connection_layout->addRow("인증할 .crt의 경로", certificate_row);
+    connection_layout->addRow("", control_apply_button_);
+    connection_layout->addRow("연결 상태", control_feedback_label_);
     connect(control_apply_button_,
             &QPushButton::clicked,
             this,
@@ -1727,7 +1758,7 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
                     control_certificate_edit_->setText(path);
                 }
             });
-    layout->addWidget(control);
+    layout->addWidget(connection);
 
     auto *recording = makeCard(page);
     auto *recording_layout = new QFormLayout(recording);
@@ -1742,6 +1773,28 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
     auto *legal_layout = new QVBoxLayout(legal);
     legal_layout->setContentsMargins(18, 16, 18, 16);
     legal_notice_widget_ = new LegalNoticeWidget(legal);
+    // Pi가 정책을 내려주는 API가 아직 없어 LegalNoticeWidget은 기본값이
+    // 전부 빈 값(= "등록되지 않음")이다. 시연용 기본 정책을 채워 둔다 —
+    // 13개 항목이 모두 채워져야 "고지 설정 완료" 배지로 바뀐다.
+    // TODO: Pi 정책 API가 생기면 그 응답으로 교체한다.
+    LegalNoticePolicy policy;
+    policy.actual_retention_period =
+        "위반 evidence 최대 30일 후 자동 파기 · 이의제기 건은 legal hold 해제 시까지";
+    policy.camera_installation_purpose =
+        "전기차 충전구역 주차 위반 판정 및 화재·과열 감지";
+    policy.camera_location = "VEDA 충전 스테이션 주차구역 (CH1~CH4)";
+    policy.camera_coverage = "충전구역 주차면 및 진출입 통로";
+    policy.recording_schedule = "24시간 연속 녹화";
+    policy.operator_name = "VEDA";
+    policy.privacy_officer_contact =
+        "VEDA 개인정보 보호책임자 · privacy@veda.example.com";
+    policy.request_contact = "privacy@veda.example.com";
+    policy.privacy_policy_url = "https://veda.example.com/privacy-policy";
+    policy.video_policy_url = "https://veda.example.com/video-policy";
+    policy.policy_version = "1.0.0";
+    policy.effective_date = "2026-08-27";
+    policy.last_updated_date = "2026-08-27";
+    legal_notice_widget_->setPolicy(policy);
     legal_layout->addWidget(legal_notice_widget_);
     layout->addWidget(legal);
     layout->addStretch(1);
@@ -2801,34 +2854,7 @@ void MainWindow::clearProtectedPlaybackState() {
     updatePlaybackControlState();
 }
 
-void MainWindow::applyControlSettings() {
-    clearProtectedPlaybackState();
-    QUrl normalized;
-    QString error;
-    if (!normalizeHttpsBaseUrl(control_base_url_edit_->text(),
-                               &normalized,
-                               &error)) {
-        control_feedback_label_->setText(error);
-        control_feedback_label_->setProperty("severity", "critical");
-        refreshStyle(control_feedback_label_);
-        return;
-    }
-
-    const QString certificate_path =
-        QDir::cleanPath(control_certificate_edit_->text().trimmed());
-    if (!playback_api_->configure(normalized,
-                                  "operator",
-                                  control_password_edit_->text(),
-                                  certificate_path,
-                                  &error)) {
-        control_feedback_label_->setText(error);
-        control_feedback_label_->setProperty("severity", "critical");
-        refreshStyle(control_feedback_label_);
-        return;
-    }
-
-    applied_control_base_url_ = normalized;
-    control_certificate_path_ = certificate_path;
+void MainWindow::resetControlSessionDisplay() {
     has_last_device_status_ = false;
     has_last_storage_status_ = false;
     device_status_last_updated_at_ = QDateTime();
@@ -2866,7 +2892,7 @@ void MainWindow::applyControlSettings() {
         system_reboot_notice_label_->setVisible(false);
     }
     if (server_time_label_) {
-        server_time_label_->setText("서버 시각 · 연결 중");
+        server_time_label_->setText("서버 시각 · 연결 후 확인");
     }
     if (storage_device_value_label_) {
         storage_device_value_label_->setText("상태 대기");
@@ -2880,6 +2906,97 @@ void MainWindow::applyControlSettings() {
     if (storage_alert_label_) {
         storage_alert_label_->clear();
         storage_alert_label_->setVisible(false);
+    }
+}
+
+void MainWindow::logout() {
+    // credential_failure/session_expired와 같은 "인증 안 된 상태"로
+    // 되돌리는 경로를 그대로 재사용한다 — 재생·타임라인 등 보호된 화면들이
+    // 이미 이 상태 조합(SettingsRequired)에서 "재연결 필요" 안내를 보여준다.
+    //
+    // clearSession()만으로는 토큰만 지워질 뿐 isConfigured()는 여전히
+    // true라서, "다시 시도" 류 버튼들이 예전 비밀번호로 조용히 재인증해
+    // 버린다. deconfigure()로 완전히 초기화해서 설정 탭에서 "Control API
+    // 적용"을 다시 눌러야만 재인증되게 한다.
+    playback_api_->deconfigure();
+    playback_login_ever_succeeded_ = false;
+    playback_login_in_progress_ = false;
+    device_status_retry_after_login_ = false;
+    clearProtectedPlaybackState();
+    if (event_api_client_) {
+        event_api_client_->stopPolling();
+    }
+    if (stm_device_list_widget_) {
+        stm_device_list_widget_->stopPolling();
+    }
+    // 지난 세션에서 받아둔 화면 내용을 남기면 다시 로그인했을 때 "이미
+    // 인증된 상태"처럼 보인다 — 실제로는 토큰이 없어 아무 요청도 못 하는데
+    // Pi 상태 배지·이벤트 목록만 그대로 떠 있기 때문이다.
+    resetControlSessionDisplay();
+    if (event_store_) {
+        event_store_->clear();
+        ignored_critical_ids_.clear();
+        pin_baseline_established_ = false;
+        pin_baseline_event_id_ = 0;
+        updateLiveEventsPanel();
+        refreshEventsTable();
+    }
+    // setDeviceControlError()·setControlUiState()는 has_last_device_status_를
+    // 내린 뒤에 불러야 한다 — 그 전에 부르면 "캐시가 있으니 배지 유지" 분기로
+    // 빠져 옛 상태가 남는다.
+    setDeviceControlError("로그아웃했습니다.");
+    setControlUiState(ControlUiState::SettingsRequired,
+                      "로그아웃했습니다. 설정에서 Control API를 다시 적용해야 연결됩니다.");
+    if (control_feedback_label_) {
+        control_feedback_label_->setText(
+            "로그아웃했습니다. 비밀번호를 다시 입력하고 Control API 적용을 눌러 재인증하세요.");
+        control_feedback_label_->setProperty("severity", "warning");
+        refreshStyle(control_feedback_label_);
+    }
+    if (login_page_) {
+        login_page_->clearPassword();
+        login_page_->setFeedback(QString(), QString());
+    }
+    if (root_stack_) {
+        root_stack_->setCurrentIndex(0);
+    }
+}
+
+void MainWindow::applyControlSettings() {
+    clearProtectedPlaybackState();
+    // 이 함수는 설정 탭의 "Control API 적용"에서만 호출된다 — 로그인
+    // 화면의 로그인 버튼은 화면 전환만 할 뿐 이 함수를 부르지 않는다.
+    // 그래서 실패 피드백은 설정 탭의 control_feedback_label_ 하나로 충분하다.
+    const auto reportFailure = [this](const QString &message) {
+        control_feedback_label_->setText(message);
+        control_feedback_label_->setProperty("severity", "critical");
+        refreshStyle(control_feedback_label_);
+    };
+    QUrl normalized;
+    QString error;
+    if (!normalizeHttpsBaseUrl(control_base_url_edit_->text(),
+                               &normalized,
+                               &error)) {
+        reportFailure(error);
+        return;
+    }
+
+    const QString certificate_path =
+        QDir::cleanPath(control_certificate_edit_->text().trimmed());
+    if (!playback_api_->configure(normalized,
+                                  "operator",
+                                  login_page_ ? login_page_->password() : QString(),
+                                  certificate_path,
+                                  &error)) {
+        reportFailure(error);
+        return;
+    }
+
+    applied_control_base_url_ = normalized;
+    control_certificate_path_ = certificate_path;
+    resetControlSessionDisplay();
+    if (server_time_label_) {
+        server_time_label_->setText("서버 시각 · 연결 중");
     }
     control_base_url_edit_->setText(normalized.toString());
     control_certificate_edit_->setText(certificate_path);
@@ -3608,12 +3725,14 @@ void MainWindow::setPlaybackFeedback(const QString &text,
 }
 
 void MainWindow::setBaseUrlFeedback(const QString &text, const QString &severity) {
-    if (!base_url_feedback_label_) {
+    // "적용 상태" 행을 없애면서 base URL 적용 피드백은 설정 카드의
+    // "연결 상태"(control_feedback_label_) 한 곳으로 합쳤다.
+    if (!control_feedback_label_) {
         return;
     }
-    base_url_feedback_label_->setText(text);
-    base_url_feedback_label_->setProperty("severity", severity);
-    refreshStyle(base_url_feedback_label_);
+    control_feedback_label_->setText(text);
+    control_feedback_label_->setProperty("severity", severity);
+    refreshStyle(control_feedback_label_);
 }
 
 void MainWindow::startStreams() {

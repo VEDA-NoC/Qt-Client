@@ -20,6 +20,7 @@ class QPushButton;
 class QSlider;
 class QStackedWidget;
 class QTimer;
+class QToolButton;
 class QTimeEdit;
 class PlaybackApiClient;
 struct DeviceStatusSnapshot;
@@ -42,6 +43,8 @@ class StmDeviceListWidget;
 class QTableWidget;
 class QVBoxLayout;
 class QHBoxLayout;
+class LoginPage;
+class SignupPage;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -57,6 +60,7 @@ protected:
 private slots:
     void applyBaseUrl();
     void applyControlSettings();
+    void logout();
     void searchPlaybackTimeline();
     void playSelectedRange();
     void togglePlaybackPause();
@@ -124,6 +128,11 @@ private:
     void refreshPlaybackAuthUi(bool authenticated);
     void setControlUiState(ControlUiState state,
                            const QString &message = QString());
+    // 마지막 인증 세션에서 받아둔 Pi/저장소/서버시각 표시를 "아직 모름"
+    // 상태로 되돌린다. 캐시 플래그(has_last_*)를 같이 내려야 한다 —
+    // setControlUiState()가 그 플래그를 보고 배지 갱신을 건너뛰기 때문에,
+    // 안 내리면 로그아웃 후에도 옛 "정상" 배지가 그대로 남는다.
+    void resetControlSessionDisplay();
     void setPlaybackPivotDate(const QDate &date);
     QDateTime currentServerDisplayTime() const;
     void shiftPlaybackPivot(int direction);
@@ -162,7 +171,6 @@ private:
     QLabel *page_subtitle_label_ = nullptr;
     QLineEdit *base_url_edit_ = nullptr;
     QPushButton *base_url_apply_button_ = nullptr;
-    QLabel *base_url_feedback_label_ = nullptr;
     QPushButton *start_button_ = nullptr;
     QPushButton *stop_button_ = nullptr;
     QLabel *connection_badge_ = nullptr;
@@ -194,10 +202,14 @@ private:
     QWidget *app_sidebar_ = nullptr;
     QFrame *top_bar_ = nullptr;
     QFrame *bottom_bar_ = nullptr;
+    QStackedWidget *root_stack_ = nullptr;
+    LoginPage *login_page_ = nullptr;
+    SignupPage *signup_page_ = nullptr;
     QLineEdit *control_base_url_edit_ = nullptr;
-    QLineEdit *control_password_edit_ = nullptr;
     QLineEdit *control_certificate_edit_ = nullptr;
     QPushButton *control_apply_button_ = nullptr;
+    QToolButton *logout_button_ = nullptr;
+    QToolButton *exit_button_ = nullptr;
     QLabel *control_feedback_label_ = nullptr;
     LegalNoticeWidget *legal_notice_widget_ = nullptr;
     ParkingZoneEditor *parking_zone_editor_ = nullptr;
