@@ -118,6 +118,7 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_a
     form->addRow("유형", type_combo_);
     form->addRow("상태", enabled_check_);
     form->addRow("스테이션 지정", device_combo_);
+
     device_status_label_ = new QLabel(inspector);
     device_status_label_->setWordWrap(true);
     device_status_label_->setProperty("settingsFeedback", true);

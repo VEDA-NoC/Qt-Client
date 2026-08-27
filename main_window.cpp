@@ -43,6 +43,7 @@
 #include <QSize>
 #include <QSizePolicy>
 #include <QSlider>
+#include <QScrollBar>
 #include <QStackedWidget>
 #include <QStackedLayout>
 #include <QStringList>
@@ -4126,37 +4127,43 @@ static QTableWidgetItem *makeTableItem(const QString &text, Qt::Alignment align 
     return ti;
 }
 
-void MainWindow::appendEventRow(const ParkingEventItem &item) {
-    int row = events_table_->rowCount();
-    events_table_->insertRow(row);
-
+// 이벤트 탭 한 행. 위/아래 어느 쪽에 넣든 내용은 같아야 하므로 삽입 위치만
+// 호출자가 정하고 셀 채우기는 여기 한 곳에서 한다.
+void MainWindow::fillEventRow(int row, const ParkingEventItem &item) {
     quint64 ts_ms = item.occurred_at_utc_ms > 0 ? item.occurred_at_utc_ms : item.received_at_utc_ms;
     QDateTime dt = (ts_ms > 0) ? QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(ts_ms), QTimeZone("Asia/Seoul")) : QDateTime();
     events_table_->setItem(row, 0, makeTableItem(
         dt.isValid() ? dt.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) : QStringLiteral("-")));
 
-    QString sevStr = item.severity == EventSeverity::Critical ? QStringLiteral("CRITICAL")
-                   : item.severity == EventSeverity::Warning  ? QStringLiteral("WARNING")
-                                                              : QStringLiteral("INFO");
+    // 서버가 카메라 이벤트의 severity를 비워 보내므로 표시·필터는 모두
+    // effectiveSeverity()를 쓴다(parking_event_types.h 주석 참고).
+    const EventSeverity severity = item.effectiveSeverity();
+    const bool violation = item.isParkingViolation();
+    QString sevStr = severity == EventSeverity::Critical ? QStringLiteral("CRITICAL")
+                   : severity == EventSeverity::Warning  ? QStringLiteral("WARNING")
+                                                         : QStringLiteral("INFO");
+    // 위반은 같은 WARNING 안에서도 한눈에 구분돼야 한다 — 필터 어휘는
+    // 서버 등급 그대로 두고 꼬리표만 붙인다.
+    if (violation) sevStr += QStringLiteral(" · 위반");
     auto *sevItem = makeTableItem(sevStr);
-    if (item.severity == EventSeverity::Critical)     sevItem->setForeground(QBrush(QColor(211, 47, 47)));
-    else if (item.severity == EventSeverity::Warning) sevItem->setForeground(QBrush(QColor(230, 81, 0)));
-    else                                               sevItem->setForeground(QBrush(QColor(46, 125, 50)));
+    if (severity == EventSeverity::Critical)     sevItem->setForeground(QBrush(QColor(211, 47, 47)));
+    else if (violation)                          sevItem->setForeground(QBrush(QColor(178, 106, 0)));
+    else if (severity == EventSeverity::Warning) sevItem->setForeground(QBrush(QColor(230, 81, 0)));
+    else                                         sevItem->setForeground(QBrush(QColor(46, 125, 50)));
     events_table_->setItem(row, 1, sevItem);
 
     QString chStr = QStringLiteral("CH %1").arg(item.channel_id);
     if (!item.payload.space_label.isEmpty()) chStr += QStringLiteral(" (%1)").arg(item.payload.space_label);
     events_table_->setItem(row, 2, makeTableItem(chStr));
 
-    QString detail = item.payload.violation ? QStringLiteral("비전기차 충전구역 점유 위반") : item.payload.state;
+    // 카드와 같은 문구를 쓴다 — 같은 이벤트가 두 화면에서 다르게 설명되면 안 된다.
+    QString detail = parking_event_text::detailLine(item);
     if (detail.isEmpty()) detail = item.event_type;
     events_table_->setItem(row, 3, makeTableItem(detail, Qt::AlignLeft | Qt::AlignVCenter));
 
-    QString plateInfo = item.payload.plate;
-    if (item.payload.ev == QStringLiteral("yes"))     plateInfo += QStringLiteral(" [EV 전기차]");
-    else if (item.payload.ev == QStringLiteral("no")) plateInfo += QStringLiteral(" [내연기관]");
-    else                                               plateInfo += QStringLiteral(" [미확인]");
-    events_table_->setItem(row, 4, makeTableItem(plateInfo));
+    QString vehicle = parking_event_text::vehicleSummary(item);
+    if (vehicle.isEmpty()) vehicle = QStringLiteral("-");
+    events_table_->setItem(row, 4, makeTableItem(vehicle));
 
     auto *ackBtn = new QPushButton(item.acked ? QStringLiteral("확인됨") : QStringLiteral("확인"), events_table_);
     ackBtn->setEnabled(!item.acked);
@@ -4169,48 +4176,25 @@ void MainWindow::appendEventRow(const ParkingEventItem &item) {
     events_table_->setCellWidget(row, 5, ackBtn);
 }
 
-void MainWindow::prependEventRow(const ParkingEventItem &item) {
-    events_table_->insertRow(0);
-
-    quint64 ts_ms = item.occurred_at_utc_ms > 0 ? item.occurred_at_utc_ms : item.received_at_utc_ms;
-    QDateTime dt = (ts_ms > 0) ? QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(ts_ms), QTimeZone("Asia/Seoul")) : QDateTime();
-    events_table_->setItem(0, 0, makeTableItem(
-        dt.isValid() ? dt.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")) : QStringLiteral("-")));
-
-    QString sevStr = item.severity == EventSeverity::Critical ? QStringLiteral("CRITICAL")
-                   : item.severity == EventSeverity::Warning  ? QStringLiteral("WARNING")
-                                                              : QStringLiteral("INFO");
-    auto *sevItem = makeTableItem(sevStr);
-    if (item.severity == EventSeverity::Critical)     sevItem->setForeground(QBrush(QColor(211, 47, 47)));
-    else if (item.severity == EventSeverity::Warning) sevItem->setForeground(QBrush(QColor(230, 81, 0)));
-    else                                               sevItem->setForeground(QBrush(QColor(46, 125, 50)));
-    events_table_->setItem(0, 1, sevItem);
-
-    QString chStr = QStringLiteral("CH %1").arg(item.channel_id);
-    if (!item.payload.space_label.isEmpty()) chStr += QStringLiteral(" (%1)").arg(item.payload.space_label);
-    events_table_->setItem(0, 2, makeTableItem(chStr));
-
-    QString detail = item.payload.violation ? QStringLiteral("비전기차 충전구역 점유 위반") : item.payload.state;
-    if (detail.isEmpty()) detail = item.event_type;
-    events_table_->setItem(0, 3, makeTableItem(detail, Qt::AlignLeft | Qt::AlignVCenter));
-
-    QString plateInfo = item.payload.plate;
-    if (item.payload.ev == QStringLiteral("yes"))     plateInfo += QStringLiteral(" [EV 전기차]");
-    else if (item.payload.ev == QStringLiteral("no")) plateInfo += QStringLiteral(" [내연기관]");
-    else                                               plateInfo += QStringLiteral(" [미확인]");
-    events_table_->setItem(0, 4, makeTableItem(plateInfo));
-
-    auto *ackBtn = new QPushButton(item.acked ? QStringLiteral("확인됨") : QStringLiteral("확인"), events_table_);
-    ackBtn->setEnabled(!item.acked);
-    ackBtn->setCursor(Qt::PointingHandCursor);
-    ackBtn->setProperty("vmsEventId", QVariant::fromValue(item.event_id));
-    quint64 eventId = item.event_id;
-    connect(ackBtn, &QPushButton::clicked, this, [this, eventId]() {
-        if (event_store_) event_store_->setAcked(eventId, true);
-    });
-    events_table_->setCellWidget(0, 5, ackBtn);
+void MainWindow::appendEventRow(const ParkingEventItem &item) {
+    const int row = events_table_->rowCount();
+    events_table_->insertRow(row);
+    fillEventRow(row, item);
 }
 
+// 현재 선택된 심각도·채널 필터를 통과하는가. 표시 등급으로 판정하므로
+// "WARNING (경고)"를 고르면 주차 위반도 함께 걸린다.
+bool MainWindow::eventPassesTableFilter(const ParkingEventItem &item) const {
+    const int sevIdx = events_severity_filter_ ? events_severity_filter_->currentIndex() : 0;
+    const int chIdx  = events_channel_filter_  ? events_channel_filter_->currentIndex()  : 0;
+    const EventSeverity severity = item.effectiveSeverity();
+
+    if (sevIdx == 1 && severity != EventSeverity::Critical) return false;
+    if (sevIdx == 2 && severity != EventSeverity::Warning)  return false;
+    if (sevIdx == 3 && severity != EventSeverity::Info)     return false;
+    if (chIdx > 0  && item.channel_id != chIdx)             return false;
+    return true;
+}
 
 void MainWindow::updateLiveEventsPanel() {
     if (!event_store_) return;
@@ -4319,48 +4303,30 @@ void MainWindow::handleEventCardAction(const QString &action, const ParkingEvent
     }
 }
 
+// 필터 조건으로 테이블을 통째로 다시 그린다.
+//
+// 예전에는 "행이 비었으면 전체 재구성, 아니면 최신 1건만 prepend"로 나뉘어
+// 있었는데, 필터 콤보의 currentIndexChanged도 같은 함수를 부르기 때문에 행이
+// 한 번 쌓이고 나면 필터를 바꿔도 목록이 그대로였다. 같은 이유로 long poll이
+// 한 배치에 N건을 실어 와도 1건만 들어갔다. 이벤트는 초당 수십 건씩 오는
+// 종류가 아니고 행 상한이 500이라 매번 다시 그려도 비용이 문제되지 않는다.
 void MainWindow::refreshEventsTable() {
     if (!events_table_ || !event_store_) return;
 
+    // 다시 그리면 스크롤이 맨 위로 튀므로 위치를 보존한다.
+    QScrollBar *bar = events_table_->verticalScrollBar();
+    const int scroll_value = bar ? bar->value() : 0;
+
     events_table_->setUpdatesEnabled(false);
+    events_table_->setRowCount(0);
 
-    int sevIdx = events_severity_filter_ ? events_severity_filter_->currentIndex() : 0;
-    int chIdx  = events_channel_filter_  ? events_channel_filter_->currentIndex()  : 0;
-
-    const auto &all = event_store_->allEvents();
-    if (all.isEmpty()) {
-        events_table_->setRowCount(0);
-        events_table_->setUpdatesEnabled(true);
-        return;
-    }
-
-    // 테이블이 비어있으면 전체 재구성 (초기 로딩)
-    if (events_table_->rowCount() == 0) {
-        for (int i = all.size() - 1; i >= 0; --i) {
-            const auto &item = all[i];
-            if (sevIdx == 1 && item.severity != EventSeverity::Critical) continue;
-            if (sevIdx == 2 && item.severity != EventSeverity::Warning)  continue;
-            if (sevIdx == 3 && item.severity != EventSeverity::Info)     continue;
-            if (chIdx > 0  && item.channel_id != chIdx)                  continue;
-            appendEventRow(item);
-        }
-        events_table_->setUpdatesEnabled(true);
-        return;
-    }
-
-    // 이미 행이 있으면 최신 이벤트만 맨 위에 삽입
-    const auto &item = all.last();
-    if (sevIdx == 1 && item.severity != EventSeverity::Critical) { events_table_->setUpdatesEnabled(true); return; }
-    if (sevIdx == 2 && item.severity != EventSeverity::Warning)  { events_table_->setUpdatesEnabled(true); return; }
-    if (sevIdx == 3 && item.severity != EventSeverity::Info)     { events_table_->setUpdatesEnabled(true); return; }
-    if (chIdx > 0  && item.channel_id != chIdx)                  { events_table_->setUpdatesEnabled(true); return; }
-    prependEventRow(item);
-
-    // 최대 500행 초과 시 오래된 행 제거
     constexpr int kMaxRows = 500;
-    while (events_table_->rowCount() > kMaxRows) {
-        events_table_->removeRow(events_table_->rowCount() - 1);
+    const auto &all = event_store_->allEvents();
+    for (int i = all.size() - 1; i >= 0 && events_table_->rowCount() < kMaxRows; --i) {
+        if (!eventPassesTableFilter(all[i])) continue;
+        appendEventRow(all[i]);  // 역순 순회 + append = 최신이 맨 위
     }
 
     events_table_->setUpdatesEnabled(true);
+    if (bar) bar->setValue(qMin(scroll_value, bar->maximum()));
 }

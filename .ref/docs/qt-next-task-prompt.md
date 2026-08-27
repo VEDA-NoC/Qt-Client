@@ -1,121 +1,117 @@
 # Qt 다음 작업 시작 프롬프트
 
-- 상태: 구현 완료 / 사용자 빌드·실기 검증 대기
-- 작성 기준일: 2026-08-03
+- 작성 기준일: 2026-08-25 (`main@4c0dfa9`, working tree clean)
+- 이전 판(2026-08-03, 라이브 레이아웃·법적 고지·서버 시각 작업)은 모두 반영됐고 이 문서로 대체된다.
 
-## 2026-08-03 구현 결과
+## 1. 현재 기준선
 
-- live grid는 `SetNoConstraint`와 `Ignored` size policy를 사용해 일반형·초광폭형에서
-  viewport가 geometry를 소유한다. 세로형만 4개 panel의 명시적 최소 높이로 scroll
-  content를 구성한다.
-- `VideoPanel`은 영상 전용 host 안에서 child 영상 label의 geometry를 계산한다. child의
-  maximum size를 부모 resize 중 변경하지 않으므로 layout feedback loop가 생기지 않는다.
-  영상은 `KeepAspectRatio`로 렌더링하며 crop과 왜곡을 적용하지 않는다.
-- 영상 통계는 항상 한 줄이며 panel 폭이 바뀌는 `resizeEvent`에서만 표시 항목 수를
-  선택한다. 좁은 panel에서는 오른쪽 상세 항목부터 생략하고 hover tooltip은 사용하지
-  않는다. 통계 값·source 해상도 갱신은 grid 높이를 바꾸지 않는다.
-- 일반형·초광폭형은 행 수를 유지하면서 `2592:1520` surface가 들어가는 grid 폭과
-  높이만 사용해 중앙 정렬한다. 남는 공간은 영상 내부 letterbox가 아니라 앱 배경으로
-  둔다.
-- 정보 및 법적 고지는 개인정보 요약, 정책 링크, 공식 출처, 제품·버전을 항상
-  표시하고 `영상정보처리기기 운영 상세`만 전체 너비 disclosure로 유지한다.
-- `/api/v1/status` polling은 5초를 유지하고, 수신한 `server_time.utc_ms`에
-  `QElapsedTimer` 경과 시간을 더해 기존 1초 UI timer에서 서버 시각을 진행한다.
-- 하단 상태는 `서버 ...`, `저장소 여유 available/total` 계열로 정리했다. CPU·온도,
-  메모리와 `Pi 가동 시간`은 장치 상세에만 표시하고 load average는 UI에서 제외한다.
-- Windows 저DPI의 Pretendard 한글 가로획 소실을 피하기 위해 번들 글꼴을 static TTF로
-  교체하고 강제 vertical hinting은 제거했다. Control 인증서 기본 경로는 사용자 고정
-  경로를 사용한다.
-- 녹화 Timeline은 라이브 worker 종료 뒤 네 채널을 병렬 조회한다. 조회 기준의 `현재`와
-  미래 시각 제한은 PC clock이 아니라 `server_time.utc_ms + monotonic elapsed`를
-  사용하며 화면에는 서버 기준 KST로 표시한다.
+| 항목 | 값 |
+|---|---|
+| branch / commit | `main` / `4c0dfa9` (PR #2 merge) |
+| 최근 merge | PR #1 `41a9a72` STM32 구역 제어기 연동, PR #2 `0fce84b` 구역-STM 매핑 UX·이벤트 상단 고정 |
+| 빌드 환경 | Qt 6.11.0 MinGW 64-bit, CMake, vcpkg FFmpeg `x64-mingw-dynamic` |
+| 연동 대상 | Pi `rpi-vms` `main@9b6c4e6` (P2.3 + 원격 명령 409 수정까지 merge) |
 
-빌드·실행·GUI 검증은 프로젝트 규칙에 따라 수행하지 않았으며 사용자가 검증한다.
+Pi 쪽 상태와 API 계약은 `rtsps-codex-hanwha-rtsp-raspberry-pi/project-docs/rpi-vms/current-status-ko.md`,
+STM 펌웨어 상태는 `stm32-ev-firmware/STM_Sensor.md`를 본다.
 
-### 사용자 실기 검증 추가 항목
+## 2. 구현된 범위
 
-1. 문제가 발생했던 96 DPI/Windows 배율에서 `스`, `시스템`, `오픈소스`, `저장소`의
-   `ㅡ` 가로획이 유지되는지 확인한다.
-2. 설정의 영상정보 운영 상세 row에서 title과 우측 chevron이 겹치지 않고 전체 row
-   클릭과 키보드 `Space`로 열고 닫히는지 확인한다.
-3. Control 인증서 입력란의 최초 값이
-   `C:/Users/shini/Documents/Codex/2026-07-10/server.crt`인지 확인한다.
-4. 장치 상세에 load average가 없고 CPU·온도·메모리·Pi 가동 시간만 남는지 확인한다.
-5. 일반형 2x2에서 각 영상 surface가 `2592:1520`에 근접하고 검은 letterbox 대신
-   grid 바깥의 앱 배경 여백이 생기는지 확인한다.
-6. 모든 panel의 통계가 한 줄인지, 폭이 줄면 오른쪽 상세 항목부터 생략되고 hover
-   tooltip이 나타나지 않는지 확인한다.
-7. 재생 화면 진입 직후 라이브 worker가 모두 종료된 다음 CH1~CH4 Timeline 요청이
-   병렬로 시작되는지 로그의 `request_id`와 `elapsed_ms`로 확인한다.
-8. `현재`와 `다음 구간`이 서버 시각을 넘지 않고 `표시: 서버 기준 · KST`와 실제
-   Timeline 눈금이 일치하는지 확인한다.
+| 영역 | 파일 | 내용 |
+|---|---|---|
+| 실시간 4채널 | `stream_worker.*`, `video_panel.*` | FFmpeg RTSPS 디코딩, 채널별 백오프 재연결, 2x2 / 4x1 / 1x4 자동 전환 |
+| 화면 셸 | `main_window.*`, `theme.*` | 5개 페이지, 상·하단 바, 서버 시각 보간(status 5초 + monotonic elapsed) |
+| 재생 | `playback_api_client.*`, `timeline_widget.*` | 로그인, status, timeline 윈도우·프리페치, playback session, seek, 속도, 전체 화면 |
+| 주차 구역 | `parking_zone_editor.*`, `parking_zone_canvas.*` | 4점 polygon, draft → 검증 → 적용 잡 폴링, undo/redo, STM 장치 매핑 |
+| 이벤트 | `parking_event_api_client.*`, `parking_event_store.*`, `parking_event_card_widget.*` | cursor long polling, 카드 패널 + 테이블, CRITICAL 상단 고정(기준선 방식), **EV 구역 주차 위반 카드**(2026-08-25) |
+| STM 연동 | `stm_api_client.*`, `stm_device_list_widget.*`, `stm_fire_response_dialog.*`, `stm_types.h` | 장치 목록 5초 폴링, 등록 해제, 진압 명령 제출·상태 추적 |
+| 고지 | `legal_notice_widget.*` | 개인정보 요약 상시 표시 + 운영 상세 disclosure |
 
-아래 내용을 새 Codex 작업의 시작 프롬프트로 사용한다.
+## 3. 확인된 결함과 정리 대상
+
+아래는 2026-08-25 소스 정적 검토에서 확인된 항목이다. **UI·UX 판단이 필요한 것은 계획 승인 전에
+코드를 고치지 않는다.**
+
+### 3-1. 이벤트 페이지 필터가 동작하지 않음 — **2026-08-25 수정 완료**
+
+`refreshEventsTable()`이 "행이 비었으면 전체 재구성, 아니면 최신 1건 prepend"로 갈라져 있어,
+행이 쌓인 뒤에는 필터를 바꿔도 목록이 그대로였고 long poll 한 배치에 N건이 와도 1건만 들어갔다.
+매번 전체 재구성(행 상한 500, 스크롤 위치 보존)으로 바꾸고 필터 판정을
+`eventPassesTableFilter()`로 분리했다. 주차 위반 표시 작업과 함께 반영됐다 —
+[decisions/12 §5](decisions/12-parking-event-long-polling-ui.md) 참조.
+
+### 3-2. 특정 PC 고정 경로·주소가 소스에 박혀 있음
+
+- Control 인증서 기본 경로 `C:/Users/shini/Documents/Codex/2026-07-10/server.crt`
+  (`createSettingsPage()`)
+- 실시간 RTSPS 기본 주소 `rtsps://100.93.115.22:8554` (`main_window.h`의 `applied_base_url_`)
+
+팀 배포 시 매번 설정 화면에서 고쳐야 한다. 설정 영속화(`QSettings`) 도입 여부와 기본값을
+무엇으로 둘지는 UX 결정이 필요하므로 계획 단계에서 확정한다.
+
+### 3-3. 문서 대비 코드 주석 불일치 (경미)
+
+`control_task` 등 STM 쪽 이야기가 아니라 Qt 쪽만 보면, `.ref/docs/decisions/03`의 원안(TCP/TLS
+프레이밍)은 채택되지 않았고 실제는 HTTPS REST + long polling이다. 해당 문서는 2026-08-25에
+"실제 구현된 규약" 절을 추가해 정리했다.
+
+## 4. 미검증 항목 (사용자 실기 수행 대상)
+
+프로젝트 규칙상 빌드·실행·실기 테스트는 사용자가 수행한다. 현재 미검증으로 남은 것:
+
+1. STM32 + Pi + Qt 3자 통합: Qt 진압 승인 → `POST /api/v1/stm-commands` → STM 액추에이터 동작 →
+   STAGE 이벤트가 카드에 반영되는 전 구간. Pi 쪽 U6 검증 당시에는 액추에이터가 미장착이라
+   명령이 `ACCEPTED`에 머물렀고, 이후 STM에 진압 액추에이터가 구현됐으므로 재확인이 필요하다.
+2. 장치 페이지의 STM 목록: 등록된 장치와 "붙었지만 미등록"인 장치가 구분되어 보이는지, 등록
+   해제 후 목록과 주차 구역 매핑이 함께 갱신되는지.
+3. 구역-STM 매핑 편집 후 draft → 검증 → 적용 → readback 흐름.
+4. 이벤트 상단 고정 기준선: 재로그인으로 백로그가 다시 내려와도 과거 CRITICAL이 고정되지 않는지.
+5. **주차 위반 표시(2026-08-25 구현)**: EV 전용 구역에 내연기관 주차 → `주차 위반` 앰버 카드,
+   전기차 주차 → 정보 카드 유지, `ev=unknown` 판독 대기 구간에서 위반이 먼저 뜨지 않는지,
+   위반 차량 출차 시 `출차 완료`로 뜨는지(위반 카드가 다시 뜨면 안 됨), 이벤트 탭에서
+   `WARNING (경고)` 필터로 위반만 걸러지는지. 상세는
+   [decisions/12 §5](decisions/12-parking-event-long-polling-ui.md).
+6. M6 재생 검증 항목 전반은 [qt-m6-playback-test-plan.md](qt-m6-playback-test-plan.md) 기준.
+
+## 5. 다음 작업 후보
+
+| 우선순위 | 작업 | 비고 |
+|---|---|---|
+| 높음 | ~~3-1 이벤트 필터 결함 수정~~ | 2026-08-25 주차 위반 작업과 함께 완료 |
+| 높음 | 주차 위반 표시 실기 검증 | §4-5 항목. 카메라가 `violation=true`를 실제로 올리는 상황을 만들어야 한다 |
+| 높음 | 3자 실기 통합 검증 지원 | 로그·재현 절차 정리 |
+| 중간 | 3-2 설정 영속화 | 기본값·저장 위치는 UX 결정 필요 |
+| 중간 | M7.5 운영 검증 항목 | 권한 분리, 번호판 마스킹, 보존기간 표시 |
+| 낮음 | M5 GPU 렌더링 경로 판단 | 먼저 CPU 병목 측정이 선행돼야 한다 |
+
+## 6. 새 작업 시작 프롬프트
 
 ```text
 VEDA VMS Qt 프로젝트의 후속 작업이다.
 
-먼저 다음 파일과 그 문서가 연결하는 관련 결정을 읽고 현재 source와 대조해라.
+먼저 다음 파일을 읽고 현재 source와 대조해라.
 - AGENTS.md
 - .ref/docs/README.md
 - .ref/docs/qt-next-task-prompt.md
-- .ref/docs/decisions/07-storage-and-operations.md
-- .ref/docs/decisions/08-ui-brand-compliance.md
-- .ref/docs/decisions/11-control-tls-and-playback-ui.md
-- .ref/docs/qt-storage-status-test-plan.md
+- .ref/docs/milestone.md
+- 작업과 관련된 .ref/docs/decisions/ 문서
+
+Pi 쪽 계약이 걸린 작업이면 rtsps-codex-hanwha-rtsp-raspberry-pi 저장소의
+project-docs/rpi-vms/current-status-ko.md와 해당 API 문서도 확인해라.
 
 현재 working tree의 기존 변경은 다른 작업 소유일 수 있으므로 임의로 되돌리거나
-정리하지 마라. 사용자가 직접 빌드·실행·실기 테스트한다. Codex는 build command,
+정리하지 마라. 사용자가 직접 빌드·실행·실기 테스트한다. 에이전트는 build command,
 실행 파일, GUI, offscreen platform을 포함해 직접 빌드하거나 실행하지 않는다.
 
-이번 작업의 목표는 다음 UI·UX 문제를 현재 source 기준으로 분석하고, 사용자 승인 후
-수정하는 것이다.
+이번 작업 범위: [여기에 작업 지정]
 
-1. 라이브 4채널을 순차로 로드할 때 개별 영상 영역과 레이아웃 크기가 커졌다 작아지는
-   원인을 확인한다. 특히 live grid의 size constraint, VideoPanel resizeEvent에서
-   child QLabel 제약을 변경하는 로직, stats text의 wrap/size hint, 부모 layout과
-   child geometry 사이 feedback loop를 확인한다. 영상 출력 widget이 별도 외부 창인지
-   Qt 내부 child widget인지 source 근거로 설명한다.
-2. 채널 수신 시작이나 source 해상도 변경이 부모 창과 grid geometry를 바꾸지 않도록
-   안정적인 layout 경계를 제안한다. 일반 가로 화면 2x2, 세로 화면 4x1, 초광폭 1x4와
-   가로 화면 복귀를 유지하고 네 채널의 행·열 크기를 동일하게 한다.
-3. KeepAspectRatio를 유지해 crop과 왜곡은 기본 적용하지 않는다. 원본과 surface 비율이
-   다를 때의 정상 letterbox와 잘못된 panel geometry 때문에 커진 불필요한 letterbox를
-   구분해 설명하고 후자만 줄이는 계획을 제시한다.
-4. 설정의 정보 및 법적 고지 화면을 정리한다. 짧은 개인정보 처리 내용은 항상
-   표시하고 영상정보처리기기 운영 상세만 disclosure로 둔다. 작은 action button형
-   토글 대신 전체 너비 section row와 chevron을 검토한다. 제품·버전은 하단에 항상
-   표시하고 번들 글꼴은 오픈소스·제3자 라이선스에 포함한다.
-5. /api/v1/status의 server_time.utc_ms를 5초마다 기준점으로 받고 monotonic elapsed를
-   더해 기존 1초 UI timer에서 서버 시각을 진행시키는 방식을 검토한다. polling 주기는
-   5초로 유지하고 NTP 동기화 상태는 별도로 표시한다.
-6. 하단 상태 문구는 `Pi 정상` 대신 `서버 정상` 계열을, 저장소는
-   `저장소 여유 388/491 GB` 형식을 우선 검토한다. CPU·온도·메모리는 상세 화면에
-   둔다.
-7. `Load 1m`은 요약에서 제외하고 상세에서 `시스템 부하(1분)`으로 표시한다. CPU
-   percentage로 변환하거나 코어 수를 Qt에 하드코딩하지 않는다. `Uptime`은
-   `Pi 가동 시간`으로 바꾸고, Pi API가 제공하기 전에는 VMS service uptime을
-   추정하지 않는다.
-
-UI·UX 문제이므로 첫 답변에서는 코드를 수정하지 말고 다음을 제시한다.
+UI·UX 동작이나 화면 배치가 걸린 항목이면 첫 답변에서 코드를 수정하지 말고 다음을 제시한다.
 - source에서 확인된 정확한 원인과 근거 파일·함수
 - 서로 연관된 영향
 - 권장 동작과 변경할 파일
-- crop 여부처럼 실제 선택이 필요한 대안
+- 실제 선택이 필요한 대안
 - 정적 검토와 사용자가 수행할 실기 테스트 계획
 
 사용자가 계획을 승인한 뒤에만 코드와 필요한 문서를 수정한다. 승인 범위 안에서 새
-UX 결정이 필요하면 임의 선택하지 말고 다시 계획 단계로 돌아간다.
+UX 결정이 필요해지면 임의 선택하지 말고 다시 계획 단계로 돌아간다.
 ```
-
-## 다음 작업에서 확인할 주요 가설
-
-아래는 확정 원인이 아니라 source로 검증할 조사 항목이다.
-
-- `QGridLayout::SetMinimumSize`와 child size hint가 scroll area geometry를 밀어내는지
-- `VideoPanel::resizeEvent()`가 영상 label의 maximum height를 변경해 layout 재계산을
-  반복시키는지
-- 연결 전후로 길이가 달라지는 통계 label의 word-wrap이 각 행 높이를 바꾸는지
-- `Qt::KeepAspectRatio`의 정상 letterbox와 과도한 panel 높이가 합쳐져 보이는지
-
-조사 결과와 수정 계획을 사용자가 승인하기 전에는 이 가설을 확정 설계로 옮기지 않는다.
