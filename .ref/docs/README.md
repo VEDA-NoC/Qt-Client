@@ -2,6 +2,10 @@
 
 이 문서는 프로젝트 문서의 출처와 성격을 구분하기 위한 색인이다. 논의 중인 제안은 확정 사양으로 취급하지 않는다.
 
+**현재 상태와 다음 작업의 진입점은 [Qt 다음 작업 시작 프롬프트](qt-next-task-prompt.md)다** (2026-08-25 기준).
+Pi 쪽 상태는 `rtsps-codex-hanwha-rtsp-raspberry-pi/project-docs/rpi-vms/current-status-ko.md`,
+STM 펌웨어 상태는 `stm32-ev-firmware/STM_Sensor.md`에 있다.
+
 ## 전역 규칙
 
 - 기본 응답과 프로젝트 문서는 한국어로 작성한다.

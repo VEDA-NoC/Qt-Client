@@ -1,6 +1,7 @@
 #include "parking_event_card_widget.h"
 #include <QDateTime>
 #include <QMap>
+#include <QStringList>
 #include <QTimeZone>
 #include <QStyleOption>
 #include <QPainter>
@@ -40,7 +41,75 @@ bool isStmStageEvent(const QString &event_type) {
            event_type == QStringLiteral("stm.stage2_state_changed");
 }
 
+// 위반 카드 전용 배지. 주의(주황)보다 한 단계 강하게 보이되 화재 위험(빨강)과는
+// 구분돼야 해서 앰버 톤을 따로 둔다 — 결정 4에서 위반은 상단 고정하지 않고
+// 색으로만 구분하기로 했으므로, 목록 안에서 눈에 띄는 것이 유일한 강조 수단이다.
+const QString kBadgeViolation = QStringLiteral(
+    "background-color: #FFF8E1; color: #B26A00; border: 1px solid #FFE082; border-radius: 10px; font-weight: bold; font-size: 11px;");
+
 }  // namespace
+
+namespace parking_event_text {
+
+// 차량/EV 한 줄 요약. 번호판 원문은 Pi가 "****"로 지우고 보내므로
+// (parking_camera_observation.cpp:379) 원문을 기대하지 않는다.
+QString vehicleSummary(const ParkingEventItem &event) {
+    QStringList parts;
+    const QString &ev = event.payload.ev;
+    if (ev == QStringLiteral("no")) {
+        parts << QStringLiteral("내연기관");
+    } else if (ev == QStringLiteral("yes")) {
+        parts << QStringLiteral("EV 전기차");
+    } else if (!ev.isEmpty()) {
+        // ev=unknown은 판독 대기다. 카메라가 이 상태를 위반으로 올리지 않으므로
+        // (project-docs/PARKING_EVENTS.md) 화면에서도 단정하지 않는다.
+        parts << QStringLiteral("EV 판정 대기");
+    }
+    if (event.camera_payload.plate_present || event.payload.plate == QStringLiteral("****")) {
+        parts << QStringLiteral("번호판 %1").arg(event.payload.plate.isEmpty() ? QStringLiteral("****")
+                                                                              : event.payload.plate);
+    } else if (!event.payload.plate.isEmpty()) {
+        parts << QStringLiteral("차량 %1").arg(event.payload.plate);
+    }
+    return parts.join(QStringLiteral(" · "));
+}
+
+// 점유 경과 시간. 미점유(-1)이거나 값이 없으면 빈 문자열.
+QString parkedDuration(const ParkingEventItem &event) {
+    const qint64 ms = event.camera_payload.parked_ms_ago;
+    if (ms < 0) return QString();
+    const qint64 minutes = ms / 60000;
+    if (minutes < 1) return QStringLiteral("1분 미만");
+    if (minutes < 60) return QStringLiteral("%1분").arg(minutes);
+    return QStringLiteral("%1시간 %2분").arg(minutes / 60).arg(minutes % 60);
+}
+
+QString detailLine(const ParkingEventItem &event) {
+    QString detail;
+    if (event.isParkingViolation()) {
+        detail = QStringLiteral("전기차 전용 구역에 비전기차 주차");
+    } else if (event.phase == EventPhase::Ended) {
+        return QStringLiteral("차량 진출 완료");
+    } else if (event.payload.state == QStringLiteral("occupied")) {
+        detail = QStringLiteral("차량 진입 감지");
+    } else if (event.payload.state == QStringLiteral("vacant")) {
+        return QStringLiteral("구역 비어 있음");
+    } else if (!event.payload.state.isEmpty()) {
+        // 서버가 다른 어휘를 보내면 그대로 노출한다 — 임의로 번역하면
+        // 모르는 상태를 아는 것처럼 표시하게 된다.
+        return event.payload.state;
+    } else {
+        detail = QStringLiteral("차량 진입 감지");
+    }
+
+    const QString parked = parkedDuration(event);
+    if (!parked.isEmpty()) {
+        detail += QStringLiteral(" · %1 경과").arg(parked);
+    }
+    return detail;
+}
+
+}  // namespace parking_event_text
 
 ParkingEventCardWidget::ParkingEventCardWidget(const ParkingEventItem &event, QWidget *parent)
     : QWidget(parent), event_(event) {
@@ -141,9 +210,14 @@ void ParkingEventCardWidget::updateEvent(const ParkingEventItem &event) {
     // 마지막에 severity 순으로 결정한다. STAGE1/2_STATE_CHANGED가 항상
     // CRITICAL이라(§2.9) severity만으로 분기하면 진압 진행 상태 변화까지
     // "화재 경고"로 오표시된다.
+    //
+    // 카메라 이벤트는 서버가 severity를 비워 보내므로 원본 severity 대신
+    // effectiveSeverity()로 분기한다 — 그러지 않으면 주차 위반이 INFO 분기의
+    // "차량 진입"으로 묻힌다.
+    const EventSeverity severity = event_.effectiveSeverity();
     if (event_.source_type == QStringLiteral("stm")) {
         applyStmEvent();
-    } else if (event_.severity == EventSeverity::Critical) {
+    } else if (severity == EventSeverity::Critical) {
         icon_label_->setText(QStringLiteral("🔥"));
         title_label_->setText(QStringLiteral("화재 경고"));
         badge_label_->setText(QStringLiteral("긴급"));
@@ -151,42 +225,29 @@ void ParkingEventCardWidget::updateEvent(const ParkingEventItem &event) {
         detail_label_->setText(event_.payload.state.isEmpty() ? QStringLiteral("연기 감지 경보") : event_.payload.state);
         plate_ev_label_->clear();
         action_button_->show();
-    } else if (event_.severity == EventSeverity::Warning) {
-        icon_label_->setText(QStringLiteral("🅿️"));
-        title_label_->setText(QStringLiteral("주차 칸 점유"));
-        badge_label_->setText(QStringLiteral("경고"));
-        badge_label_->setStyleSheet(QStringLiteral("background-color: #FFF3E0; color: #E65100; border: 1px solid #FFE0B2; border-radius: 10px; font-weight: bold; font-size: 11px;"));
-        
-        QString detail = event_.payload.violation ? QStringLiteral("비전기차 충전구역 점유 위반") : QStringLiteral("구역 점유 감지");
-        detail_label_->setText(detail);
-
-        QString plateInfo;
-        if (!event_.payload.plate.isEmpty()) {
-            plateInfo += QStringLiteral("차량: %1").arg(event_.payload.plate);
-        }
-        if (event_.payload.ev == QStringLiteral("no")) {
-            plateInfo += QStringLiteral(" [내연기관]");
-        } else if (event_.payload.ev == QStringLiteral("yes")) {
-            plateInfo += QStringLiteral(" [EV 전기차]");
-        }
-        plate_ev_label_->setText(plateInfo);
+    } else if (severity == EventSeverity::Warning) {
+        const bool violation = event_.isParkingViolation();
+        icon_label_->setText(violation ? QStringLiteral("⚠️") : QStringLiteral("🅿️"));
+        title_label_->setText(violation ? QStringLiteral("주차 위반") : QStringLiteral("주차 칸 점유"));
+        badge_label_->setText(violation ? QStringLiteral("위반") : QStringLiteral("경고"));
+        badge_label_->setStyleSheet(violation ? kBadgeViolation : kBadgeCaution);
+        detail_label_->setText(parking_event_text::detailLine(event_));
+        plate_ev_label_->setText(parking_event_text::vehicleSummary(event_));
         action_button_->hide();
     } else {
+        const bool ended = event_.phase == EventPhase::Ended;
         icon_label_->setText(QStringLiteral("🚗"));
-        title_label_->setText(event_.phase == EventPhase::Ended ? QStringLiteral("출차 완료") : QStringLiteral("차량 진입"));
+        title_label_->setText(ended ? QStringLiteral("출차 완료") : QStringLiteral("차량 진입"));
         badge_label_->setText(QStringLiteral("정보"));
-        badge_label_->setStyleSheet(QStringLiteral("background-color: #E8F5E9; color: #2E7D32; border: 1px solid #C8E6C9; border-radius: 10px; font-weight: bold; font-size: 11px;"));
+        badge_label_->setStyleSheet(kBadgeInfo);
 
-        detail_label_->setText(event_.phase == EventPhase::Ended ? QStringLiteral("차량 진출 완료") : QStringLiteral("차량 진입 감지"));
+        detail_label_->setText(parking_event_text::detailLine(event_));
 
-        QString plateInfo;
-        if (!event_.payload.plate.isEmpty()) {
-            plateInfo += QStringLiteral("차량: %1").arg(event_.payload.plate);
-        }
-        if (event_.payload.ev == QStringLiteral("yes")) {
-            plateInfo += QStringLiteral(" [EV 전기차]");
-        }
-        plate_ev_label_->setText(plateInfo);
+        // 출차 카드에는 차량 정보를 붙이지 않는다 — 서버는 ended 전이에서
+        // plate만 지우고 ev_state는 직전 값을 그대로 남기므로
+        // (parking_camera_observation.cpp:485-490), 그대로 쓰면 이미 나간 차의
+        // EV 판정이 남아 있는 것처럼 보인다.
+        plate_ev_label_->setText(ended ? QString() : parking_event_text::vehicleSummary(event_));
         action_button_->hide();
     }
 
@@ -305,6 +366,11 @@ void ParkingEventCardWidget::applyTheme() {
     if (event_.source_type == QStringLiteral("stm") && isStmStageEvent(event_.event_type)) {
         borderCol = QStringLiteral("#BBDEFB");
         bgCol = QStringLiteral("#F5FAFF");
+    } else if (event_.isParkingViolation()) {
+        // 위반 카드는 상단 고정을 하지 않기로 했으므로(결정 4), 목록 안에서
+        // 배경까지 앰버로 칠해 스크롤 중에도 눈에 걸리게 한다.
+        borderCol = QStringLiteral("#FFE082");
+        bgCol = QStringLiteral("#FFFDF5");
     } else if (event_.severity == EventSeverity::Critical) {
         borderCol = QStringLiteral("#FFCDD2");
         bgCol = QStringLiteral("#FFF5F5");
