@@ -18,6 +18,7 @@ class LegalNoticeWidget;
 class QLineEdit;
 class QPushButton;
 class QSlider;
+class QStackedLayout;
 class QStackedWidget;
 class QTimer;
 class QToolButton;
@@ -98,6 +99,9 @@ private:
     QWidget *createEventsPage(QWidget *parent);
     QWidget *createDevicesPage(QWidget *parent);
     QWidget *createSettingsPage(QWidget *parent);
+    // 인증 전 접근을 막는 자리(실시간 이벤트, 이벤트 목록, 장치 및 제어)에
+    // 공통으로 쓰는 안내 위젯. 설정으로 이동 버튼까지 미리 배선해서 돌려준다.
+    QWidget *createAuthGateOverlay(const QString &message, QWidget *parent);
     QFrame *createSummaryCard(const QString &title,
                               const QString &value,
                               const QString &caption,
@@ -226,6 +230,10 @@ private:
     QVBoxLayout *live_events_card_layout_ = nullptr;
     QScrollArea *live_events_scroll_ = nullptr;
     QWidget *live_events_container_ = nullptr;
+    // index 0=실제 목록, 1=인증 필요 안내. setControlUiState()가 토글한다.
+    QStackedLayout *live_events_gate_stack_ = nullptr;
+    QStackedLayout *events_gate_stack_ = nullptr;
+    QStackedLayout *devices_page_stack_ = nullptr;
     QTableWidget *events_table_ = nullptr;
     QComboBox *events_severity_filter_ = nullptr;
     QComboBox *events_channel_filter_ = nullptr;

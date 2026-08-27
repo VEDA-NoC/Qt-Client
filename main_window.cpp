@@ -771,6 +771,10 @@ void MainWindow::createUi() {
         first_button->setChecked(true);
     }
     setCurrentPage(0);
+    // 이벤트/장치 페이지의 인증 게이트는 createPlaybackPage()가 맨 처음
+    // 걸었던 refreshPlaybackAuthUi(false) 시점엔 아직 존재하지 않았다
+    // (뒤에 생성됨) — 모든 페이지가 다 만들어진 지금 다시 한번 동기화한다.
+    refreshPlaybackAuthUi(false);
 
     auto *timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &MainWindow::updateTotalStats);
@@ -993,18 +997,23 @@ QWidget *MainWindow::createLivePage(QWidget *parent) {
     events_layout->setSpacing(10);
     events_layout->addWidget(makeSectionTitle("실시간 이벤트", events));
 
+    auto *live_events_content = new QWidget(events);
+    auto *live_events_content_layout = new QVBoxLayout(live_events_content);
+    live_events_content_layout->setContentsMargins(0, 0, 0, 0);
+    live_events_content_layout->setSpacing(10);
+
     // 고정 영역 — live_events_scroll_ 바깥에 둔다. 스크롤 안에 넣으면 내릴 때
     // 같이 사라져 "상단 고정"이 성립하지 않는다(Q3-1).
-    live_events_pinned_container_ = new QWidget(events);
+    live_events_pinned_container_ = new QWidget(live_events_content);
     live_events_pinned_layout_ = new QVBoxLayout(live_events_pinned_container_);
     live_events_pinned_layout_->setContentsMargins(0, 0, 0, 8);
     live_events_pinned_layout_->setSpacing(8);
     // 스크롤이 없는 고정 영역이라 트레일링 스트레치를 안 둔다 — syncEventCards()가
     // 마지막 아이템이 spacer인지 직접 확인해 있으면/없으면 둘 다 처리한다.
     live_events_pinned_container_->hide();
-    events_layout->addWidget(live_events_pinned_container_);
+    live_events_content_layout->addWidget(live_events_pinned_container_);
 
-    live_events_scroll_ = new QScrollArea(events);
+    live_events_scroll_ = new QScrollArea(live_events_content);
     live_events_scroll_->setWidgetResizable(true);
     live_events_scroll_->setFrameShape(QFrame::NoFrame);
     live_events_scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -1018,7 +1027,16 @@ QWidget *MainWindow::createLivePage(QWidget *parent) {
     live_events_container_->setLayout(live_events_card_layout_);
     live_events_scroll_->setWidget(live_events_container_);
 
-    events_layout->addWidget(live_events_scroll_, 1);
+    live_events_content_layout->addWidget(live_events_scroll_, 1);
+
+    auto *live_events_gate_host = new QWidget(events);
+    live_events_gate_stack_ = new QStackedLayout(live_events_gate_host);
+    live_events_gate_stack_->setContentsMargins(0, 0, 0, 0);
+    live_events_gate_stack_->addWidget(live_events_content);
+    live_events_gate_stack_->addWidget(createAuthGateOverlay(
+        "접근 권한이 없습니다. server.crt로 인증 후 열람 가능합니다.", events));
+    live_events_gate_stack_->setCurrentIndex(1);
+    events_layout->addWidget(live_events_gate_host, 1);
     updateLiveEventsPanel();
 
     live_page_layout_->addWidget(live_grid_scroll_, 0, 0);
@@ -1585,7 +1603,15 @@ QWidget *MainWindow::createEventsPage(QWidget *parent) {
     events_table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     events_table_->setSelectionBehavior(QAbstractItemView::SelectRows);
     events_table_->setAlternatingRowColors(true);
-    layout->addWidget(events_table_, 1);
+
+    auto *events_gate_host = new QWidget(page);
+    events_gate_stack_ = new QStackedLayout(events_gate_host);
+    events_gate_stack_->setContentsMargins(0, 0, 0, 0);
+    events_gate_stack_->addWidget(events_table_);
+    events_gate_stack_->addWidget(createAuthGateOverlay(
+        "접근 권한이 없습니다. server.crt로 인증 후 열람 가능합니다.", page));
+    events_gate_stack_->setCurrentIndex(1);
+    layout->addWidget(events_gate_host, 1);
 
     layout->addWidget(makeMutedLabel("Pi GET /api/v1/events Long Polling 연결 수신 중. 수신된 이벤트 세션 상태는 실시간으로 갱신됩니다.", page));
 
@@ -1597,7 +1623,14 @@ QWidget *MainWindow::createEventsPage(QWidget *parent) {
 }
 
 QWidget *MainWindow::createDevicesPage(QWidget *parent) {
-    auto *page = new QWidget(parent);
+    // 인증 전에는 이 페이지 전체를 빈 안내 화면으로 대체한다. 상단바의
+    // 제목·부제(kPageSubtitles)는 page_stack_ 바깥에 있는 별도 위젯이라
+    // 이 스택과 무관하게 계속 떠 있는다.
+    auto *host = new QWidget(parent);
+    auto *host_stack = new QStackedLayout(host);
+    host_stack->setContentsMargins(0, 0, 0, 0);
+
+    auto *page = new QWidget(host);
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(18, 18, 18, 18);
     layout->setSpacing(12);
@@ -1675,7 +1708,13 @@ QWidget *MainWindow::createDevicesPage(QWidget *parent) {
     stm_device_list_widget_ = new StmDeviceListWidget(stm_api_, hierarchy);
     hierarchy_layout->addWidget(stm_device_list_widget_, 1);
     layout->addWidget(hierarchy, 1);
-    return page;
+
+    host_stack->addWidget(page);
+    host_stack->addWidget(createAuthGateOverlay(
+        "접근 권한이 없습니다. server.crt로 인증 후 열람 가능합니다.", host));
+    devices_page_stack_ = host_stack;
+    devices_page_stack_->setCurrentIndex(1);
+    return host;
 }
 
 QWidget *MainWindow::createSettingsPage(QWidget *parent) {
@@ -1732,10 +1771,9 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
     certificate_layout->addWidget(certificate_browse_button);
     control_apply_button_ = new QPushButton("Control API 적용", connection);
     control_apply_button_->setProperty("primary", true);
-    control_feedback_label_ =
-        makeMutedLabel("비밀번호는 메모리에만 보관하며 server.crt와 IP/hostname SAN을 검증합니다.",
-                       connection);
+    control_feedback_label_ = makeMutedLabel("crt 인증이 필요합니다.", connection);
     control_feedback_label_->setProperty("settingsFeedback", true);
+    control_feedback_label_->setProperty("severity", "warning");
     connection_layout->addRow("HTTPS Base URL", control_base_url_edit_);
     connection_layout->addRow("사용자", new QLabel("operator", connection));
     connection_layout->addRow("인증할 .crt의 경로", certificate_row);
@@ -1760,15 +1798,6 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
             });
     layout->addWidget(connection);
 
-    auto *recording = makeCard(page);
-    auto *recording_layout = new QFormLayout(recording);
-    recording_layout->setContentsMargins(18, 16, 18, 16);
-    recording_layout->addRow("녹화 메인스트림", new QLabel("2592x1520 · 최대 30 fps", recording));
-    recording_layout->addRow("실시간 서브스트림", new QLabel("1080p 목표", recording));
-    recording_layout->addRow("움직임 녹화", new QLabel("사전 5초 · 사후 10초 · 세그먼트 최대 약 60초", recording));
-    recording_layout->addRow("설정 소유권", new QLabel("Pi config.get/config.update · revision 충돌 검출", recording));
-    layout->addWidget(recording);
-
     auto *legal = makeCard(page);
     auto *legal_layout = new QVBoxLayout(legal);
     legal_layout->setContentsMargins(18, 16, 18, 16);
@@ -1789,8 +1818,8 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
     policy.privacy_officer_contact =
         "VEDA 개인정보 보호책임자 · privacy@veda.example.com";
     policy.request_contact = "privacy@veda.example.com";
-    policy.privacy_policy_url = "https://veda.example.com/privacy-policy";
-    policy.video_policy_url = "https://veda.example.com/video-policy";
+    policy.privacy_policy_url = "https://www.hanwhavision.com/ko/policy/privacy";
+    policy.video_policy_url = "https://www.hanwhavision.com/ko/support/warranty-repair";
     policy.policy_version = "1.0.0";
     policy.effective_date = "2026-08-27";
     policy.last_updated_date = "2026-08-27";
@@ -1800,6 +1829,28 @@ QWidget *MainWindow::createSettingsPage(QWidget *parent) {
     layout->addStretch(1);
     scroll->setWidget(page);
     return scroll;
+}
+
+QWidget *MainWindow::createAuthGateOverlay(const QString &message, QWidget *parent) {
+    auto *overlay = new QWidget(parent);
+    overlay->setStyleSheet("background: #FFFFFF;");
+    auto *layout = new QVBoxLayout(overlay);
+    layout->setContentsMargins(24, 24, 24, 24);
+    layout->setAlignment(Qt::AlignCenter);
+    auto *label = makeMutedLabel(message, overlay);
+    label->setAlignment(Qt::AlignCenter);
+    label->setWordWrap(true);
+    auto *settings_button = new QPushButton("설정으로 이동", overlay);
+    settings_button->setFixedWidth(132);
+    layout->addWidget(label);
+    layout->addWidget(settings_button, 0, Qt::AlignHCenter);
+    connect(settings_button, &QPushButton::clicked, this, [this]() {
+        if (auto *button = navigation_group_->button(4)) {
+            button->setChecked(true);
+        }
+        setCurrentPage(4);
+    });
+    return overlay;
 }
 
 QFrame *MainWindow::createSummaryCard(const QString &title,
@@ -2190,9 +2241,7 @@ void MainWindow::setControlUiState(ControlUiState state,
     QString prompt = message;
     if (prompt.isEmpty()) {
         if (settings_required) {
-            prompt =
-                "Control API 설정이 필요합니다.\n"
-                "server.crt와 비밀번호를 적용하세요.";
+            prompt = "접근 권한이 없습니다. server.crt로 인증 후 열람 가능합니다.";
         } else if (state == ControlUiState::Connecting) {
             prompt = "Control API에 연결하는 중입니다…";
         } else if (retryable) {
@@ -2277,6 +2326,17 @@ void MainWindow::setControlUiState(ControlUiState state,
             playback_timeline_auth_prompt_->raise();
         }
     }
+    // index 0=실제 콘텐츠, 1=인증 필요 안내 — createLivePage/createEventsPage/
+    // createDevicesPage에서 이 순서로 addWidget했다.
+    if (live_events_gate_stack_) {
+        live_events_gate_stack_->setCurrentIndex(ready ? 0 : 1);
+    }
+    if (events_gate_stack_) {
+        events_gate_stack_->setCurrentIndex(ready ? 0 : 1);
+    }
+    if (devices_page_stack_) {
+        devices_page_stack_->setCurrentIndex(ready ? 0 : 1);
+    }
     if (playback_timeline_) {
         playback_timeline_->setEmptyMessage(
             ready
@@ -2321,6 +2381,16 @@ void MainWindow::updateServerTimeDisplay() {
     if (!server_time_interpolation_active_ ||
         server_time_base_utc_ms_ <= 0 ||
         !server_time_elapsed_.isValid()) {
+        // Pi에서 받은 서버 시각이 아직 없다(=crt 인증 전) — 그렇다고 이
+        // 자리를 빈칸/고정 문구로 비워두지 않고, 인증 없이도 볼 수 있는
+        // PC 로컬 시각을 실시간으로 채워둔다. "서버"라고 잘못 표기하지
+        // 않도록 라벨을 구분한다 — 실제 Pi 동기화 시각은 아래에서 덮어쓴다.
+        if (server_time_label_) {
+            server_time_label_->setText(
+                QString("현재 %1 · PC 기준")
+                    .arg(QDateTime::currentDateTime()
+                             .toString("yyyy-MM-dd HH:mm:ss")));
+        }
         return;
     }
 
@@ -2948,8 +3018,7 @@ void MainWindow::logout() {
     setControlUiState(ControlUiState::SettingsRequired,
                       "로그아웃했습니다. 설정에서 Control API를 다시 적용해야 연결됩니다.");
     if (control_feedback_label_) {
-        control_feedback_label_->setText(
-            "로그아웃했습니다. 비밀번호를 다시 입력하고 Control API 적용을 눌러 재인증하세요.");
+        control_feedback_label_->setText("crt 인증이 필요합니다.");
         control_feedback_label_->setProperty("severity", "warning");
         refreshStyle(control_feedback_label_);
     }
