@@ -1,5 +1,39 @@
 # 03. 제어 규약과 장치 모델
 
+- 상태: **구현 확정 (2026-08-25 갱신)** — 아래 "실제 구현된 규약"이 현재 계약이다.
+  본문의 장기 연결 TCP/TLS 프레이밍 안은 **채택되지 않았다**.
+
+## 실제 구현된 규약 (2026-08-25)
+
+| 구간 | 규약 | 비고 |
+|---|---|---|
+| CCTV → Raspberry Pi | RTSP + SUNAPI(OpenSDK) 이벤트 | Digest `monitordiff` wake-up + `/parking_status` XML snapshot diff |
+| Raspberry Pi → Qt | RTSPS | 실시간·VOD 영상. 변경 없음 |
+| Raspberry Pi ↔ Qt | **HTTPS REST + Bearer 토큰**, 이벤트는 `GET /api/v1/events` **cursor long polling** | 장기 연결 TCP/TLS 프레이밍은 쓰지 않는다 |
+| Raspberry Pi ↔ STM32 | **Modbus RTU over RS-485** (19200 8E1), Pi가 유일한 master | 공용 header `stm_protocol.h` v0.2가 계약 |
+
+- **Qt↔Pi 전송 방식이 바뀐 이유**: Pi가 이미 HTTPS control plane(로그인·status·timeline·
+  playback session·parking API)을 운영하고 있어, 이벤트만 별도 소켓 프로토콜을 두면 인증·TLS·
+  재접속 로직이 이중이 된다. cursor long polling은 같은 Bearer 경로를 그대로 타면서
+  `next_after_id`로 유실 없이 이어받는다. 아래 본문의 JSON envelope·request_id 설계는
+  채택되지 않았으므로 참고 기록으로만 본다.
+- **Pi↔STM32**: 자체 바이너리 프레임 대신 STM 쪽 기존 `alejoseb/Modbus-STM32-HAL-FreeRTOS`
+  라이브러리와 호환되는 Modbus RTU를 채택했다. FC4(입력 레지스터 읽기)와 FC16(command mailbox
+  쓰기) 두 경로만 쓰고 custom function code는 추가하지 않는다.
+- **화재 대응 단계**: 1단계 방재포 전개, 2단계 살수 펌프. 원격 `START_STAGE1`은 단독 전개가
+  아니라 **순차 진압(방재포 → 살수)**으로 처리된다. 로컬 버튼 경로는 화재 경고(DANGER)
+  상태에서만 받는 인터록이 걸리고, 원격 경로는 관리자가 Qt에서 승인하는 절차가 인터록을 대신한다.
+  한 번 동작한 stage는 `REARM` 전까지 재기동되지 않는다.
+- **Qt 구현 위치**: `stm_api_client.*`(REST 4종), `stm_device_list_widget.*`(장치 목록·등록 해제),
+  `stm_fire_response_dialog.*`(진압 승인창), `stm_types.h`(프로토콜 값 사본),
+  `parking_zone_editor.*`(구역-STM 매핑).
+- 상세는 Pi 저장소의 `project-docs/rpi-vms/p2.3-stm-qt-integration-plan-ko.md`와
+  `stm-rs485-protocol-design-ko.md`를 본다.
+
+---
+
+## 아래는 2026-07-22 설계 검토 기록 (일부 미채택)
+
 - 상태: 부분 확정 (STM32 실장 피드백 규약 대기)
 
 ## 전체 통신 기준안

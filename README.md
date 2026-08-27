@@ -1,6 +1,8 @@
 # VEDA VMS Qt Client
 
-Windows용 Qt Widgets 클라이언트입니다. 현재 구현은 4채널 RTSPS 실시간 영상, Control API 기반 재생/타임라인, 주차 영역 편집, 이벤트 long polling을 포함합니다.
+Windows용 Qt Widgets 클라이언트입니다. 현재 구현은 4채널 RTSPS 실시간 영상, Control API 기반 재생/타임라인, 주차 영역 편집, 이벤트 long polling, 그리고 RS-485로 붙은 STM32 구역 제어기의 상태 조회·화재 진압 제어·등록 관리를 포함합니다.
+
+마지막 갱신: 2026-08-25 (`main@4c0dfa9`). 진행 상황과 다음 작업은 [.ref/docs/qt-next-task-prompt.md](.ref/docs/qt-next-task-prompt.md)를 봅니다.
 
 ## 개발 환경
 
@@ -84,20 +86,40 @@ Qt Creator를 사용하는 경우 `Desktop Qt 6.11.0 MinGW 64-bit` kit를 선택
 
 - 기본 포트 규칙은 RTSPS 호스트의 `9443`입니다. 실제 서버 구성에 맞는 `https://host:port`를 입력합니다.
 - 사용자 이름은 현재 `operator`로 표시되며, 비밀번호는 실행 중 입력합니다.
-- 로그인 후 status, timeline, thumbnail, playback session, parking API 및 event long polling이 동작합니다.
+- 로그인 후 status, timeline, thumbnail, playback session, parking API, event long polling 및 STM 장치·명령 API가 동작합니다.
+
+### STM32 구역 제어기
+
+- Pi를 `--enable-stm-bus` 계열 플래그로 기동해야 STM API가 응답합니다. 꺼져 있으면 Qt에는
+  `503 stm_bus_disabled`가 표시됩니다.
+- 장치 페이지의 충전 스테이션 목록은 그 페이지에 있을 때만 5초 주기로 폴링합니다.
+- 진압 명령은 실시간 화면의 `stm.fire_started` 카드에서 여는 대응창을 통해서만 보냅니다.
+  Qt는 `slave_address`와 opcode만 보내고, `origin`은 Pi가 `QT_ADMIN`으로 고정합니다.
+- 원격 1단계 명령은 STM 펌웨어에서 **순차 진압(방재포 전개 → 살수)**으로 처리됩니다.
 
 ### TLS 인증서
 
 개발/실기 테스트 시 Pi의 공개 인증서 `server.crt`만 `certs/server.crt`에 복사하거나 설정 화면에서 다른 경로를 선택합니다. `server.key`는 복사하지 않습니다. 인증서 파일은 저장소에 커밋하지 않으며, Qt는 trust chain·hostname/IP SAN·leaf certificate SHA-256 pin을 모두 검증합니다.
 
+> 현재 소스의 인증서 기본 경로와 RTSPS 기본 주소는 특정 개발 PC 값이 그대로 들어 있습니다.
+> 설정을 저장하는 기능이 없어 실행할 때마다 설정 화면에서 바꿔야 합니다(알려진 정리 대상 —
+> [.ref/docs/qt-next-task-prompt.md](.ref/docs/qt-next-task-prompt.md) §3-2).
+
 ## 코드 구조
 
-- `main_window.*`: 화면 구성, 4채널 상태, 재생/주차/이벤트 흐름 조정
+- `main_window.*`: 화면 구성(실시간·재생·이벤트·장치·설정 5개 페이지), 4채널 상태, 재생/주차/이벤트 흐름 조정
 - `stream_worker.*`: FFmpeg 기반 RTSPS 수신·디코딩 worker
 - `video_panel.*`: 채널별 영상 표시
 - `playback_api_client.*`: Control API 로그인, 상태, timeline, thumbnail, playback session, parking API
-- `parking_event_api_client.*`: `/api/v1/events` long polling
-- `parking_zone_editor.*`, `parking_zone_canvas.*`: 주차 영역 편집 UI
+- `parking_event_api_client.*`: `/api/v1/events` cursor long polling
+- `parking_event_store.*`, `parking_event_card_widget.*`, `parking_event_types.h`: 이벤트 저장소와 카드 UI, 이벤트 DTO(카메라·STM 양쪽 payload)
+- `parking_zone_editor.*`, `parking_zone_canvas.*`: 주차 영역 편집 UI와 STM 장치 매핑
+- `stm_api_client.*`: STM 장치 조회·명령 제출·명령 상태·등록 해제 REST 클라이언트
+- `stm_device_list_widget.*`: 장치 페이지의 충전 스테이션 목록(5초 폴링, 등록 해제)
+- `stm_fire_response_dialog.*`: 화재 진압 승인 대응창
+- `stm_types.h`: `stm_protocol.h`의 opcode·상태값 사본 (프로토콜 변경 시 함께 고쳐야 함)
+- `timeline_widget.*`: 녹화 timeline 렌더링과 구간 선택
+- `legal_notice_widget.*`: 정보 및 법적 고지 화면
 - `theme.*`: 공통 UI 토큰과 QSS
 - `resources.qrc`, `resources/`: 아이콘·폰트·앱 리소스
 - `.ref/docs/`: 설계 결정, 마일스톤, 테스트 계획 및 이전 작업 기록
@@ -129,8 +151,12 @@ Qt Creator를 사용하는 경우 `Desktop Qt 6.11.0 MinGW 64-bit` kit를 선택
 5. 1개 채널 RTSPS 연결 후 4개 채널 재연결 동작 확인
 6. timeline 조회 → thumbnail → playback session → 재생 확인
 7. 이벤트 수신과 주차 영역 조회/검증/적용 흐름 확인
+8. 장치 페이지에서 STM 목록 표시(등록 / 미등록 구분)와 등록 해제 확인
+9. `stm.fire_started` 이벤트 카드 → 진압 대응창 → 명령 제출 → 액추에이터 동작 → STAGE 이벤트
+   반영까지 STM32+Pi+Qt 3자 통합 확인
 
 상세 검증 기준은 `.ref/docs/qt-m6-playback-test-plan.md`와 관련 테스트 계획 문서를 참조합니다.
+미검증으로 남은 항목은 `.ref/docs/qt-next-task-prompt.md` §4에 정리돼 있습니다.
 
 ## 저장소 주의사항
 

@@ -9,6 +9,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -117,6 +118,12 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_a
     form->addRow("유형", type_combo_);
     form->addRow("상태", enabled_check_);
     form->addRow("STM 장치", device_combo_);
+    device_status_label_ = new QLabel(inspector);
+    device_status_label_->setWordWrap(true);
+    device_status_label_->setProperty("settingsFeedback", true);
+    device_status_label_->setProperty("severity", "warning");
+    device_status_label_->setVisible(false);
+    form->addRow(QString(), device_status_label_);
     form->addRow("센서 구역", sensor_zone_edit_);
     inspector_layout->addLayout(form);
     auto *mapping_note = new QLabel(
@@ -233,13 +240,19 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_a
     connect(stm_api_, &StmApiClient::devicesReceived, this, [this](const QVector<StmDevice> &devices) {
         known_devices_ = devices;
         devices_available_ = true;
+        device_refresh_timer_->stop();
+        device_status_label_->setVisible(false);
         refreshUi();
     });
     connect(stm_api_, &StmApiClient::requestFailed, this,
             [this](const QString &operation, const QString &message, int) {
         if (operation != QStringLiteral("stm.devices")) return;
         devices_available_ = false;
-        setFeedback(QString("STM 장치 목록을 불러오지 못했습니다: %1").arg(message), "warning");
+        // 공용 feedback_label_에 쓰면 곧이어 오는 parkingSpacesReceived의 성공
+        // 메시지에 덮여 사라진다 — 콤보 바로 옆 전용 라벨에 계속 띄워둔다.
+        device_status_label_->setText(
+            QString("STM 장치 목록을 불러오지 못했습니다: %1 (자동 재시도 중)").arg(message));
+        device_status_label_->setVisible(true);
         refreshUi();
     });
     connect(api_, &PlaybackApiClient::requestFailed, this,
@@ -263,6 +276,9 @@ ParkingZoneEditor::ParkingZoneEditor(PlaybackApiClient *api, StmApiClient *stm_a
             api_->requestParkingApplyJob(active_job_id_);
         }
     });
+    device_refresh_timer_ = new QTimer(this);
+    device_refresh_timer_->setInterval(3000);
+    connect(device_refresh_timer_, &QTimer::timeout, this, [this]() { stm_api_->fetchDevices(); });
     refreshUi();
 }
 
@@ -275,9 +291,15 @@ void ParkingZoneEditor::openChannel(int channel_id, const QImage &image) {
         setFeedback("Pi에서 활성 구역을 불러오는 중입니다.", "info");
         api_->requestParkingSpaces(channel_id_);
         stm_api_->fetchDevices();
+        device_refresh_timer_->start();
     } else {
         selectChannel(channel_id);
     }
+}
+
+void ParkingZoneEditor::hideEvent(QHideEvent *event) {
+    device_refresh_timer_->stop();
+    QWidget::hideEvent(event);
 }
 
 void ParkingZoneEditor::setReferenceImage(int channel_id, const QImage &image) {
@@ -326,6 +348,7 @@ void ParkingZoneEditor::selectChannel(int channel_id) {
     setFeedback("Pi에서 활성 구역을 불러오는 중입니다.", "info");
     api_->requestParkingSpaces(channel_id_);
     stm_api_->fetchDevices();
+    device_refresh_timer_->start();
 }
 
 void ParkingZoneEditor::loadSelection() {

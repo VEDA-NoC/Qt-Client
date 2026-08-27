@@ -152,8 +152,9 @@ private:
     void updateLiveEventsPanel();
     void syncEventCards(QVBoxLayout *layout, QWidget *container, const QVector<ParkingEventItem> &items);
     void handleEventCardAction(const QString &action, const ParkingEventItem &event);
+    void fillEventRow(int row, const ParkingEventItem &item);
     void appendEventRow(const ParkingEventItem &item);
-    void prependEventRow(const ParkingEventItem &item);
+    bool eventPassesTableFilter(const ParkingEventItem &item) const;
 
     QButtonGroup *navigation_group_ = nullptr;
     QStackedWidget *page_stack_ = nullptr;
