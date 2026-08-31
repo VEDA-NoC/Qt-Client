@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QDebug>
+#include <QUrl>
 
 #include <chrono>
 #include <exception>
@@ -20,6 +21,8 @@ namespace {
 constexpr int kMaxQueuedFrames = 3;
 constexpr int kIoTimeoutMs = 5000;
 constexpr int kFirstFrameTimeoutMs = 15000;
+constexpr int kDecodedFrameStallTimeoutMs = 5000;
+constexpr int kDecodeErrorLogIntervalMs = 1000;
 
 bool isDeprecatedFullRangeFormat(AVPixelFormat format) {
     return format == AV_PIX_FMT_YUVJ420P ||
@@ -162,6 +165,9 @@ void StreamWorker::run() {
 void StreamWorker::runImpl() {
     queued_frames_.store(0);
     emit statusChanged("Opening");
+    const auto worker_started_at = std::chrono::steady_clock::now();
+    const QString route = playback_ ? QString("playback")
+                                    : QUrl(url_).path();
 
     avformat_network_init();
 
@@ -199,6 +205,11 @@ void StreamWorker::runImpl() {
         }
         return;
     }
+    qInfo().noquote()
+        << QString("[stream-open] channel=%1 mode=%2 route=%3 state=open_success")
+               .arg(channel_ + 1)
+               .arg(playback_ ? "playback" : "live")
+               .arg(route);
 
     resetIoDeadline(interrupt_context);
     ret = avformat_find_stream_info(format_context, nullptr);
@@ -228,6 +239,12 @@ void StreamWorker::runImpl() {
         avformat_close_input(&format_context);
         return;
     }
+    qInfo().noquote()
+        << QString("[stream-open] channel=%1 mode=%2 route=%3 state=stream_info codec=%4")
+               .arg(channel_ + 1)
+               .arg(playback_ ? "playback" : "live")
+               .arg(route)
+               .arg(QString::fromLatin1(codec->name));
 
     AVCodecContext *codec_context = avcodec_alloc_context3(codec);
     if (!codec_context) {
@@ -243,7 +260,6 @@ void StreamWorker::runImpl() {
         avformat_close_input(&format_context);
         return;
     }
-
     codec_context->flags |= AV_CODEC_FLAG_LOW_DELAY;
     ret = avcodec_open2(codec_context, codec, nullptr);
     if (ret < 0) {
@@ -252,6 +268,12 @@ void StreamWorker::runImpl() {
         avformat_close_input(&format_context);
         return;
     }
+    qInfo().noquote()
+        << QString("[stream-open] channel=%1 mode=%2 route=%3 state=decoder_open codec=%4")
+               .arg(channel_ + 1)
+               .arg(playback_ ? "playback" : "live")
+               .arg(route)
+               .arg(QString::fromLatin1(codec->name));
 
     std::unique_ptr<AVPacket, AvPacketDeleter> packet(av_packet_alloc());
     std::unique_ptr<AVFrame, AvFrameDeleter> frame(av_frame_alloc());
@@ -272,6 +294,10 @@ void StreamWorker::runImpl() {
     int configured_output_height = 0;
     bool playing_announced = false;
     bool fatal_frame_error = false;
+    bool first_video_packet_seen = false;
+    qint64 recoverable_decode_errors = 0;
+    auto last_decode_error_log_at = worker_started_at;
+    auto last_decoded_frame_at = worker_started_at;
     qint64 last_playback_pts_ms = -1;
     qint64 accumulated_playback_position_ms = 0;
     qint64 last_emitted_playback_position_ms = -1;
@@ -288,6 +314,24 @@ void StreamWorker::runImpl() {
     qint64 total_decoded = 0;
     qint64 total_queue_drops = 0;
     QSize last_source_size;
+
+    const auto recordRecoverableDecodeError =
+        [&](const char *stage, int error_code) {
+            ++recoverable_decode_errors;
+            const auto now = std::chrono::steady_clock::now();
+            if (recoverable_decode_errors == 1 ||
+                now - last_decode_error_log_at >=
+                    std::chrono::milliseconds(kDecodeErrorLogIntervalMs)) {
+                qWarning().noquote()
+                    << QString("[stream-decode] channel=%1 mode=live route=%2 state=packet_dropped stage=%3 error=%4 total_errors=%5")
+                           .arg(channel_ + 1)
+                           .arg(route)
+                           .arg(QString::fromLatin1(stage))
+                           .arg(ffmpegError(error_code))
+                           .arg(recoverable_decode_errors);
+                last_decode_error_log_at = now;
+            }
+        };
 
     while (!stop_requested_.load()) {
         resetIoDeadline(interrupt_context);
@@ -313,10 +357,23 @@ void StreamWorker::runImpl() {
         ++total_packets;
 
         if (packet->stream_index == video_stream_index) {
+            if (!first_video_packet_seen) {
+                first_video_packet_seen = true;
+                qInfo().noquote()
+                    << QString("[stream-open] channel=%1 mode=%2 route=%3 state=first_video_packet bytes=%4")
+                           .arg(channel_ + 1)
+                           .arg(playback_ ? "playback" : "live")
+                           .arg(route)
+                           .arg(packet->size);
+            }
             ret = avcodec_send_packet(codec_context, packet.get());
             if (ret < 0) {
-                emit statusChanged(QString("decode packet failed: %1").arg(ffmpegError(ret)));
-                fatal_frame_error = true;
+                if (!playback_ && ret == AVERROR_INVALIDDATA) {
+                    recordRecoverableDecodeError("send_packet", ret);
+                } else {
+                    emit statusChanged(QString("decode packet failed: %1").arg(ffmpegError(ret)));
+                    fatal_frame_error = true;
+                }
             } else {
                 while (ret >= 0) {
                     ret = avcodec_receive_frame(codec_context, frame.get());
@@ -324,8 +381,13 @@ void StreamWorker::runImpl() {
                         break;
                     }
                     if (ret < 0) {
-                        emit statusChanged(QString("decode failed: %1").arg(ffmpegError(ret)));
-                        fatal_frame_error = true;
+                        if (!playback_ && ret == AVERROR_INVALIDDATA) {
+                            recordRecoverableDecodeError("receive_frame", ret);
+                            av_frame_unref(frame.get());
+                        } else {
+                            emit statusChanged(QString("decode failed: %1").arg(ffmpegError(ret)));
+                            fatal_frame_error = true;
+                        }
                         break;
                     }
 
@@ -478,6 +540,8 @@ void StreamWorker::runImpl() {
                             emit playbackPositionChanged(elapsed_ms);
                         }
                     }
+                    last_decoded_frame_at =
+                        std::chrono::steady_clock::now();
                     if (!tryReserveFrameSlot()) {
                         ++interval_queue_drops;
                         ++total_queue_drops;
@@ -542,6 +606,18 @@ void StreamWorker::runImpl() {
                                                .arg(frame_width)
                                                .arg(frame_height)
                                                .arg(QString::fromLatin1(codec->name)));
+                        const qint64 first_frame_ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() -
+                                worker_started_at)
+                                .count();
+                        qInfo().noquote()
+                            << QString("[stream-open] channel=%1 mode=%2 route=%3 state=first_decoded_frame elapsed_ms=%4 recoverable_errors=%5")
+                                   .arg(channel_ + 1)
+                                   .arg(playback_ ? "playback" : "live")
+                                   .arg(route)
+                                   .arg(first_frame_ms)
+                                   .arg(recoverable_decode_errors);
                         playing_announced = true;
                     }
                     emit frameReady(output_image, QDateTime::currentMSecsSinceEpoch());
@@ -555,8 +631,17 @@ void StreamWorker::runImpl() {
         if (fatal_frame_error) {
             break;
         }
-        if (!playing_announced && std::chrono::steady_clock::now() >= first_frame_deadline) {
+        const auto now_steady = std::chrono::steady_clock::now();
+        if (!playing_announced && now_steady >= first_frame_deadline) {
             emit statusChanged(QString("first frame timeout after %1 ms").arg(kFirstFrameTimeoutMs));
+            break;
+        }
+        if (!playback_ && playing_announced &&
+            now_steady - last_decoded_frame_at >=
+                std::chrono::milliseconds(kDecodedFrameStallTimeoutMs)) {
+            emit statusChanged(
+                QString("decode stall timeout after %1 ms")
+                    .arg(kDecodedFrameStallTimeoutMs));
             break;
         }
 

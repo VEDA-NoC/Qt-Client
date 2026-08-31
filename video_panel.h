@@ -29,6 +29,10 @@ public:
     void setAspectConstrained(bool constrained,
                               const QSize &aspect = QSize(2592, 1520));
     void setMinimumVideoHeight(int height);
+    void setChannel(int channel);
+    void setQualityBadgeVisible(bool visible);
+    void setQualityBadgeText(const QString &quality);
+    void setStatusPreservingFrame(const QString &status);
 
 public slots:
     void setFrame(const QImage &image, qint64 queued_at_ms);
@@ -51,9 +55,11 @@ private:
     void updateVideoPixmap();
     void updateVideoSurfaceGeometry();
     void recordPaintedFrame();
+    void applyStatus(const QString &status, bool clear_video_on_error);
 
     int channel_ = 0;
     QLabel *title_label_ = nullptr;
+    QLabel *quality_label_ = nullptr;
     QWidget *video_host_ = nullptr;
     QLabel *video_label_ = nullptr;
     QLabel *stats_label_ = nullptr;

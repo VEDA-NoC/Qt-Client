@@ -23,11 +23,18 @@ VideoPanel::VideoPanel(int channel, QWidget *parent) : QWidget(parent), channel_
     auto *header = new QHBoxLayout();
     title_label_ = new QLabel(QString("CH %1  ·  CAMERA 1").arg(channel_ + 1), this);
     title_label_->setProperty("sectionTitle", true);
+    quality_label_ = new QLabel("준비 중", this);
+    quality_label_->setProperty("badge", true);
+    quality_label_->setProperty("severity", "warning");
+    quality_label_->setAlignment(Qt::AlignCenter);
+    quality_label_->setMinimumWidth(76);
+    quality_label_->setVisible(false);
     status_label_ = new QLabel("Stopped", this);
     status_label_->setProperty("streamState", "offline");
     status_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     header->addWidget(title_label_);
     header->addStretch(1);
+    header->addWidget(quality_label_);
     header->addWidget(status_label_);
 
     video_host_ = new QWidget(this);
@@ -73,8 +80,28 @@ QSize VideoPanel::videoSurfaceSize() const {
 
 int VideoPanel::chromeHeightHint() const {
     const int header_height =
-        qMax(title_label_->sizeHint().height(), status_label_->sizeHint().height());
+        qMax(qMax(title_label_->sizeHint().height(),
+                  status_label_->sizeHint().height()),
+             quality_label_->isVisible()
+                 ? quality_label_->sizeHint().height()
+                 : 0);
     return 16 + 14 + header_height + stats_label_->height();
+}
+
+void VideoPanel::setChannel(int channel) {
+    channel_ = channel;
+}
+
+void VideoPanel::setQualityBadgeVisible(bool visible) {
+    quality_label_->setVisible(visible);
+}
+
+void VideoPanel::setQualityBadgeText(const QString &quality) {
+    quality_label_->setText(quality);
+    quality_label_->setProperty(
+        "severity", quality.contains("준비") ? "warning" : "ok");
+    quality_label_->style()->unpolish(quality_label_);
+    quality_label_->style()->polish(quality_label_);
 }
 
 void VideoPanel::setTitle(const QString &title) {
@@ -203,10 +230,35 @@ void VideoPanel::setStreamStats(const StreamStats &stats) {
 }
 
 void VideoPanel::setStatus(const QString &status) {
+    applyStatus(status, true);
+}
+
+void VideoPanel::setStatusPreservingFrame(const QString &status) {
+    applyStatus(status, false);
+}
+
+void VideoPanel::applyStatus(const QString &status,
+                             bool clear_video_on_error) {
     QString state = "offline";
     QString display = status;
     bool clear_video = false;
-    if (status.startsWith("Playing")) {
+    if (status.startsWith("Preparing:")) {
+        state = "pending";
+        const QString target = status.section(':', 1, 1);
+        const QString active = status.section(':', 2, 2);
+        display = QString("%1 준비 중 · %2 표시").arg(target, active);
+    } else if (status.startsWith("QualityRetry:")) {
+        state = "pending";
+        const QString quality = status.section(':', 1, 1);
+        const QString seconds = status.section(':', 2, 2);
+        const QString active = status.section(':', 3, 3);
+        display = QString("%1 재시도 %2초 · %3 표시")
+                      .arg(quality, seconds, active);
+    } else if (status.startsWith("QualityPlaying:")) {
+        state = "online";
+        display = QString("%1 · 연결됨")
+                      .arg(status.section(':', 1, 1));
+    } else if (status.startsWith("Playing")) {
         state = "online";
         display = "연결됨";
     } else if (status == "PlaybackEnded") {
@@ -236,7 +288,7 @@ void VideoPanel::setStatus(const QString &status) {
     } else if (status == "Stopped") {
         display = "중지됨";
     }
-    if (clear_video) {
+    if (clear_video && clear_video_on_error) {
         resetStats();
     }
     status_label_->setText(display);
