@@ -3,6 +3,7 @@
 #include <QDate>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QMainWindow>
 #include <QSet>
 #include <QString>
@@ -28,6 +29,7 @@ struct DeviceStatusSnapshot;
 struct PlaybackSession;
 struct StorageStatus;
 class StreamWorker;
+struct StreamStats;
 class TimelineWidget;
 class VideoPanel;
 class QResizeEvent;
@@ -89,7 +91,49 @@ private:
         RetryableFailure,
     };
 
-    QString channelUrl(int channel) const;
+    enum class LiveQuality {
+        Mobile,
+        Standard,
+        High,
+    };
+
+    enum class LiveWorkerRole {
+        None,
+        Baseline,
+        Candidate,
+        Foreground,
+    };
+
+    struct LiveChannelState {
+        StreamWorker *baseline_worker = nullptr;
+        StreamWorker *candidate_worker = nullptr;
+        StreamWorker *foreground_worker = nullptr;
+        QTimer *baseline_retry_timer = nullptr;
+        QTimer *candidate_retry_timer = nullptr;
+        QTimer *baseline_stable_timer = nullptr;
+        QTimer *foreground_stable_timer = nullptr;
+        LiveQuality baseline_quality = LiveQuality::High;
+        LiveQuality candidate_quality = LiveQuality::Standard;
+        LiveQuality foreground_quality = LiveQuality::Mobile;
+        QImage latest_baseline_frame;
+        QImage latest_mobile_frame;
+        QString baseline_status = "Stopped";
+        QString candidate_status = "Stopped";
+        QString foreground_status = "Stopped";
+        double baseline_mbps = 0.0;
+        double candidate_mbps = 0.0;
+        double foreground_mbps = 0.0;
+        quint64 baseline_generation = 0;
+        quint64 candidate_generation = 0;
+        quint64 foreground_generation = 0;
+        int baseline_retry_attempts = 0;
+        int candidate_retry_attempts = 0;
+        bool baseline_has_frame = false;
+        bool foreground_displayed = false;
+    };
+
+    QString channelUrl(int channel, LiveQuality quality) const;
+    static QString liveQualityName(LiveQuality quality);
     void createUi();
     QWidget *createSidebar(QWidget *parent);
     QFrame *createTopBar(QWidget *parent);
@@ -108,19 +152,61 @@ private:
                               QWidget *parent,
                               QLabel **value_label = nullptr,
                               QLabel **caption_label = nullptr) const;
-    void handleChannelStatus(int channel, const QString &status);
     void refreshConnectionSummary();
     int activeLiveWorkerCount() const;
     bool hasPendingLiveRetries() const;
     void startChannelStream(int channel);
-    void handleLiveWorkerFinished(int channel, StreamWorker *worker);
-    void scheduleChannelRetry(int channel, const QString &reason);
-    void cancelChannelRetry(int channel, bool reset_attempt);
+    void startCandidateStream(int channel, LiveQuality quality);
+    void startLiveWorker(int channel,
+                         LiveWorkerRole role,
+                         LiveQuality quality);
+    void stopCandidateStream(int channel);
+    void stopForegroundStream(int channel);
+    LiveWorkerRole liveWorkerRole(int channel,
+                                  StreamWorker *worker,
+                                  quint64 generation) const;
+    void handleLiveFrame(int channel,
+                         StreamWorker *worker,
+                         quint64 generation,
+                         const QImage &image,
+                         qint64 queued_at_ms);
+    void handleLiveStats(int channel,
+                         StreamWorker *worker,
+                         quint64 generation,
+                         const StreamStats &stats);
+    void handleLiveStatus(int channel,
+                          StreamWorker *worker,
+                          quint64 generation,
+                          const QString &status);
+    void handleLiveWorkerFinished(int channel,
+                                  StreamWorker *worker,
+                                  quint64 generation);
+    void promoteCandidate(int channel,
+                          StreamWorker *worker,
+                          quint64 generation,
+                          const QImage &first_frame,
+                          qint64 queued_at_ms);
+    void advanceProfileReadiness(int channel);
+    void resumeAutomaticProfile(int channel);
+    void scheduleChannelRetry(int channel,
+                              LiveWorkerRole role,
+                              const QString &reason);
+    void cancelChannelRetry(int channel,
+                            LiveWorkerRole role,
+                            bool reset_attempt);
     void cancelAllChannelRetries(bool reset_attempts);
     int channelRetryDelayMs(int attempt) const;
     void setBaseUrlFeedback(const QString &text, const QString &severity);
     void requestWorkerStop();
     void finalizeStoppedState();
+    void finalizeLiveStopIfReady();
+    void showBaselineFrame(int channel);
+    VideoPanel *liveDisplayPanel(int channel) const;
+    bool liveDisplayVisible(int channel) const;
+    QSize liveOutputSize(int channel) const;
+    void toggleLiveFullscreen(int channel);
+    void closeLiveFullscreen();
+    void refreshLivePanelStatus(int channel);
     void performPlaybackApiAction(int action);
     void startPlaybackWorker(const PlaybackSession &session);
     void stopPlaybackWorker(bool clear_video);
@@ -202,6 +288,9 @@ private:
     QGridLayout *live_page_layout_ = nullptr;
     QGridLayout *live_grid_layout_ = nullptr;
     QFrame *live_events_card_ = nullptr;
+    QWidget *live_fullscreen_window_ = nullptr;
+    VideoPanel *live_fullscreen_panel_ = nullptr;
+    int live_fullscreen_channel_ = -1;
     int live_layout_mode_ = -1;
     QWidget *app_sidebar_ = nullptr;
     QFrame *top_bar_ = nullptr;
@@ -277,11 +366,8 @@ private:
     StreamWorker *playback_worker_ = nullptr;
 
     QVector<VideoPanel *> panels_;
-    QVector<StreamWorker *> workers_;
-    QVector<QString> channel_statuses_;
-    QVector<QTimer *> channel_retry_timers_;
-    QVector<QTimer *> channel_stable_timers_;
-    QVector<int> channel_retry_attempts_;
+    QVector<LiveChannelState> live_channels_;
+    QSet<StreamWorker *> retiring_live_workers_;
     QString applied_base_url_ = "rtsps://100.93.115.22:8554";
     QUrl applied_control_base_url_;
     QString control_certificate_path_;
@@ -306,7 +392,6 @@ private:
     bool playback_paused_ = false;
     bool playback_slider_dragging_ = false;
     bool playback_seek_in_progress_ = false;
-    bool live_suspended_for_playback_ = false;
     QTimer *playback_seek_timer_ = nullptr;
     QTimer *playback_video_click_timer_ = nullptr;
     QTimer *timeline_prefetch_timer_ = nullptr;

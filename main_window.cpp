@@ -252,39 +252,73 @@ QString playbackApiErrorText(const QString &operation,
 }  // namespace
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
-    channel_statuses_.fill("Stopped", 4);
-    workers_.fill(nullptr, 4);
-    channel_retry_attempts_.fill(0, 4);
+    live_channels_.resize(4);
     for (int channel = 0; channel < 4; ++channel) {
-        auto *retry_timer = new QTimer(this);
-        retry_timer->setSingleShot(true);
-        connect(retry_timer, &QTimer::timeout, this, [this, channel]() {
+        auto &state = live_channels_[channel];
+        state.baseline_retry_timer = new QTimer(this);
+        state.baseline_retry_timer->setSingleShot(true);
+        connect(state.baseline_retry_timer,
+                &QTimer::timeout,
+                this,
+                [this, channel]() {
             if (!live_desired_running_ || stopping_streams_ ||
-                shutting_down_ || workers_[channel]) {
+                shutting_down_ || live_channels_[channel].baseline_worker) {
                 return;
             }
             qInfo().noquote()
                 << QString("[live-retry] channel=%1 state=starting attempt=%2")
                        .arg(channel + 1)
-                       .arg(channel_retry_attempts_[channel]);
+                       .arg(live_channels_[channel].baseline_retry_attempts);
             startChannelStream(channel);
         });
-        channel_retry_timers_.push_back(retry_timer);
 
-        auto *stable_timer = new QTimer(this);
-        stable_timer->setSingleShot(true);
-        stable_timer->setInterval(30000);
-        connect(stable_timer, &QTimer::timeout, this, [this, channel]() {
-            if (!workers_[channel] ||
-                !channel_statuses_[channel].startsWith("Playing")) {
+        state.candidate_retry_timer = new QTimer(this);
+        state.candidate_retry_timer->setSingleShot(true);
+        connect(state.candidate_retry_timer,
+                &QTimer::timeout,
+                this,
+                [this, channel]() {
+            auto &channel_state = live_channels_[channel];
+            if (!live_desired_running_ || stopping_streams_ ||
+                shutting_down_ || channel_state.candidate_worker) {
                 return;
             }
-            channel_retry_attempts_[channel] = 0;
+            startCandidateStream(channel,
+                                 channel_state.candidate_quality);
+        });
+
+        state.baseline_stable_timer = new QTimer(this);
+        state.baseline_stable_timer->setSingleShot(true);
+        state.baseline_stable_timer->setInterval(30000);
+        connect(state.baseline_stable_timer,
+                &QTimer::timeout,
+                this,
+                [this, channel]() {
+            auto &channel_state = live_channels_[channel];
+            if (!channel_state.baseline_worker ||
+                !channel_state.baseline_status.startsWith("Playing")) {
+                return;
+            }
+            channel_state.baseline_retry_attempts = 0;
             qInfo().noquote()
                 << QString("[live-retry] channel=%1 state=stable attempts_reset=true")
                        .arg(channel + 1);
         });
-        channel_stable_timers_.push_back(stable_timer);
+
+        state.foreground_stable_timer = new QTimer(this);
+        state.foreground_stable_timer->setSingleShot(true);
+        state.foreground_stable_timer->setInterval(30000);
+        connect(state.foreground_stable_timer,
+                &QTimer::timeout,
+                this,
+                [this, channel]() {
+            auto &channel_state = live_channels_[channel];
+            if (!channel_state.foreground_worker ||
+                !channel_state.foreground_status.startsWith("Playing")) {
+                return;
+            }
+            channel_state.candidate_retry_attempts = 0;
+        });
     }
     playback_api_ = new PlaybackApiClient(this);
     stm_api_ = new StmApiClient(playback_api_, this);
@@ -525,6 +559,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
                 operation == "login" && http_status == 401;
             const bool session_expired =
                 operation != "login" && http_status == 401;
+            if (certificate_failure || credential_failure ||
+                session_expired) {
+                stopStreams();
+            }
             if (certificate_failure || credential_failure) {
                 playback_login_ever_succeeded_ = false;
                 clearProtectedPlaybackState();
@@ -670,11 +708,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     connect(f11_shortcut,
             &QShortcut::activated,
             this,
-            &MainWindow::togglePlaybackFullscreen);
+            [this]() {
+                if (page_stack_->currentIndex() == 1) {
+                    togglePlaybackFullscreen();
+                }
+            });
     auto *escape_shortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     escape_shortcut->setContext(Qt::ApplicationShortcut);
     connect(escape_shortcut, &QShortcut::activated, this, [this]() {
-        if (playback_fullscreen_window_ &&
+        if (live_fullscreen_window_ &&
+            live_fullscreen_window_->isVisible()) {
+            closeLiveFullscreen();
+        } else if (playback_fullscreen_window_ &&
             playback_fullscreen_window_->isVisible()) {
             togglePlaybackFullscreen();
         }
@@ -687,11 +732,19 @@ MainWindow::~MainWindow() {
     restart_after_stop_ = false;
     cancelAllChannelRetries(true);
     requestWorkerStop();
-    const QVector<StreamWorker *> workers = workers_;
-    for (auto *worker : workers) {
-        if (worker) {
-            worker->wait(6000);
+    for (const auto &state : live_channels_) {
+        if (state.baseline_worker) {
+            state.baseline_worker->wait(6000);
         }
+        if (state.candidate_worker) {
+            state.candidate_worker->wait(6000);
+        }
+        if (state.foreground_worker) {
+            state.foreground_worker->wait(6000);
+        }
+    }
+    for (StreamWorker *worker : retiring_live_workers_) {
+        worker->wait(6000);
     }
     if (playback_worker_) {
         playback_worker_->stop();
@@ -972,9 +1025,52 @@ QWidget *MainWindow::createLivePage(QWidget *parent) {
         auto *panel = new VideoPanel(channel, grid_host);
         panel->setAspectConstrained(false);
         panel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+        panel->setQualityBadgeVisible(true);
+        panel->setQualityBadgeText("High 준비 중");
+        connect(panel,
+                &VideoPanel::doubleClicked,
+                this,
+                [this, channel]() { toggleLiveFullscreen(channel); });
         panels_.push_back(panel);
         live_grid_layout_->addWidget(panel, channel / 2, channel % 2);
     }
+
+    live_fullscreen_window_ =
+        new QWidget(this, Qt::Window | Qt::FramelessWindowHint);
+    live_fullscreen_window_->setObjectName("liveFullscreen");
+    live_fullscreen_window_->setStyleSheet("background: #000000;");
+    auto *fullscreen_layout = new QVBoxLayout(live_fullscreen_window_);
+    fullscreen_layout->setContentsMargins(0, 0, 0, 0);
+    live_fullscreen_panel_ =
+        new VideoPanel(0, live_fullscreen_window_);
+    live_fullscreen_panel_->setAspectConstrained(false);
+    live_fullscreen_panel_->setQualityBadgeVisible(true);
+    live_fullscreen_panel_->setQualityBadgeText("High");
+    connect(live_fullscreen_panel_,
+            &VideoPanel::doubleClicked,
+            this,
+            [this]() { closeLiveFullscreen(); });
+    connect(live_fullscreen_panel_,
+            &VideoPanel::renderSizeChanged,
+            this,
+            [this](const QSize &size) {
+                if (live_fullscreen_channel_ < 0 ||
+                    live_fullscreen_channel_ >= live_channels_.size()) {
+                    return;
+                }
+                auto &state = live_channels_[live_fullscreen_channel_];
+                if (state.baseline_worker) {
+                    state.baseline_worker->setOutputSize(size);
+                }
+                if (state.candidate_worker) {
+                    state.candidate_worker->setOutputSize(size);
+                }
+                if (state.foreground_worker) {
+                    state.foreground_worker->setOutputSize(size);
+                }
+            });
+    fullscreen_layout->addWidget(live_fullscreen_panel_, 1);
+    live_fullscreen_window_->hide();
 
     live_grid_scroll_ = new QScrollArea(page);
     live_grid_scroll_->setObjectName("liveGridScroll");
@@ -2069,18 +2165,18 @@ void MainWindow::setCurrentPage(int page_index) {
     if (previous_page == 1 && page_index != 1 && playback_worker_) {
         togglePlaybackPause();
     }
-    if (page_index == 1 && previous_page != 1) {
-        live_suspended_for_playback_ =
-            live_desired_running_ || activeLiveWorkerCount() > 0 ||
-            hasPendingLiveRetries();
-        if (live_suspended_for_playback_) {
-            stopStreams();
+    if (previous_page == 0 && page_index != 0) {
+        closeLiveFullscreen();
+    } else if (page_index == 0) {
+        if (!live_desired_running_ && activeLiveWorkerCount() == 0 &&
+            !stopping_streams_) {
+            startStreams();
+        } else if (previous_page != 0) {
+            for (int channel = 0; channel < live_channels_.size(); ++channel) {
+                showBaselineFrame(channel);
+                resumeAutomaticProfile(channel);
+            }
         }
-    } else if (page_index == 0 &&
-               (live_suspended_for_playback_ ||
-                !live_desired_running_ || stopping_streams_)) {
-        live_suspended_for_playback_ = false;
-        startStreams();
     }
     page_stack_->setCurrentIndex(page_index);
     page_title_label_->setText(kPageTitles[page_index]);
@@ -2119,12 +2215,27 @@ void MainWindow::closeEvent(QCloseEvent *event) {
     QMainWindow::closeEvent(event);
 }
 
-QString MainWindow::channelUrl(int channel) const {
+QString MainWindow::liveQualityName(LiveQuality quality) {
+    switch (quality) {
+    case LiveQuality::High:
+        return "High";
+    case LiveQuality::Standard:
+        return "Standard";
+    case LiveQuality::Mobile:
+        return "Mobile";
+    }
+    return "Mobile";
+}
+
+QString MainWindow::channelUrl(int channel, LiveQuality quality) const {
     QString base = applied_base_url_;
     while (base.endsWith('/')) {
         base.chop(1);
     }
-    return QString("%1/ch%2").arg(base).arg(channel + 1);
+    return QString("%1/ch%2/%3")
+        .arg(base)
+        .arg(channel + 1)
+        .arg(liveQualityName(quality).toLower());
 }
 
 void MainWindow::applyBaseUrl() {
@@ -2988,6 +3099,7 @@ void MainWindow::logout() {
     // true라서, "다시 시도" 류 버튼들이 예전 비밀번호로 조용히 재인증해
     // 버린다. deconfigure()로 완전히 초기화해서 설정 탭에서 "Control API
     // 적용"을 다시 눌러야만 재인증되게 한다.
+    stopStreams();
     playback_api_->deconfigure();
     playback_login_ever_succeeded_ = false;
     playback_login_in_progress_ = false;
@@ -3537,12 +3649,6 @@ void MainWindow::performPlaybackApiAction(int action) {
 
     pending_playback_api_action_ = kPlaybackApiActionNone;
     if (action == kPlaybackApiActionTimeline) {
-        if (activeLiveWorkerCount() > 0 || stopping_streams_) {
-            pending_playback_api_action_ = action;
-            setPlaybackFeedback(
-                "라이브 연결 종료 후 Timeline을 조회합니다...", "warning");
-            return;
-        }
         setPlaybackFeedback("4채널 Timeline 병렬 조회 중...", "warning");
         for (int channel_id = 1; channel_id <= 4; ++channel_id) {
             playback_api_->requestTimeline(channel_id,
@@ -3834,6 +3940,20 @@ void MainWindow::startStreams() {
     start_button_->setEnabled(false);
     stop_button_->setEnabled(true);
     for (int channel = 0; channel < 4; ++channel) {
+        auto &state = live_channels_[channel];
+        state.baseline_quality = LiveQuality::High;
+        state.candidate_quality = LiveQuality::Standard;
+        state.foreground_quality = LiveQuality::Mobile;
+        state.latest_baseline_frame = QImage();
+        state.latest_mobile_frame = QImage();
+        state.baseline_status = "Stopped";
+        state.candidate_status = "Stopped";
+        state.foreground_status = "Stopped";
+        state.baseline_mbps = 0.0;
+        state.candidate_mbps = 0.0;
+        state.foreground_mbps = 0.0;
+        state.baseline_has_frame = false;
+        state.foreground_displayed = false;
         startChannelStream(channel);
     }
     start_button_->setText("다시 연결");
@@ -3859,37 +3979,88 @@ void MainWindow::stopStreams() {
 }
 
 void MainWindow::requestWorkerStop() {
-    for (auto *worker : workers_) {
-        if (worker) {
-            worker->stop();
+    for (auto &state : live_channels_) {
+        if (state.baseline_worker) {
+            state.baseline_worker->stop();
         }
+        if (state.candidate_worker) {
+            state.candidate_worker->stop();
+        }
+        if (state.foreground_worker) {
+            state.foreground_worker->stop();
+        }
+    }
+    for (StreamWorker *worker : retiring_live_workers_) {
+        worker->stop();
     }
 }
 
 void MainWindow::finalizeStoppedState() {
     cancelAllChannelRetries(true);
+    closeLiveFullscreen();
     for (int channel = 0; channel < panels_.size(); ++channel) {
+        auto &state = live_channels_[channel];
+        state.latest_baseline_frame = QImage();
+        state.latest_mobile_frame = QImage();
+        state.baseline_quality = LiveQuality::High;
+        state.candidate_quality = LiveQuality::Standard;
+        state.foreground_quality = LiveQuality::Mobile;
+        state.baseline_status = "Stopped";
+        state.candidate_status = "Stopped";
+        state.foreground_status = "Stopped";
+        state.baseline_mbps = 0.0;
+        state.candidate_mbps = 0.0;
+        state.foreground_mbps = 0.0;
+        state.baseline_has_frame = false;
+        state.foreground_displayed = false;
         panels_[channel]->resetStats();
-        handleChannelStatus(channel, "Stopped");
+        panels_[channel]->setStatus("Stopped");
+        panels_[channel]->setQualityBadgeText("High 준비 중");
     }
     start_button_->setText("스트림 시작");
     start_button_->setEnabled(true);
     stop_button_->setEnabled(false);
 }
 
+void MainWindow::finalizeLiveStopIfReady() {
+    if (!stopping_streams_ || activeLiveWorkerCount() > 0) {
+        return;
+    }
+    const bool should_restart =
+        restart_after_stop_ && live_desired_running_ && !shutting_down_;
+    finalizeStoppedState();
+    stopping_streams_ = false;
+    restart_after_stop_ = false;
+    if (should_restart) {
+        start_button_->setText("다시 연결 중");
+        start_button_->setEnabled(false);
+        QTimer::singleShot(0, this, &MainWindow::startStreams);
+    }
+}
+
 int MainWindow::activeLiveWorkerCount() const {
     int count = 0;
-    for (const auto *worker : workers_) {
-        if (worker) {
+    for (const auto &state : live_channels_) {
+        if (state.baseline_worker) {
+            ++count;
+        }
+        if (state.candidate_worker) {
+            ++count;
+        }
+        if (state.foreground_worker) {
             ++count;
         }
     }
+    count += retiring_live_workers_.size();
     return count;
 }
 
 bool MainWindow::hasPendingLiveRetries() const {
-    for (const auto *timer : channel_retry_timers_) {
-        if (timer && timer->isActive()) {
+    for (const auto &state : live_channels_) {
+        if ((state.baseline_retry_timer &&
+             state.baseline_retry_timer->isActive()) ||
+            (state.candidate_retry_timer &&
+             state.candidate_retry_timer->isActive())) {
             return true;
         }
     }
@@ -3897,156 +4068,520 @@ bool MainWindow::hasPendingLiveRetries() const {
 }
 
 void MainWindow::startChannelStream(int channel) {
-    if (channel < 0 || channel >= workers_.size() ||
-        channel >= panels_.size() || workers_[channel] ||
+    if (channel < 0 || channel >= live_channels_.size() ||
+        channel >= panels_.size() ||
         !live_desired_running_ || stopping_streams_ || shutting_down_) {
         return;
     }
+    auto &state = live_channels_[channel];
+    if (state.baseline_worker) {
+        return;
+    }
+    state.baseline_retry_timer->stop();
+    startLiveWorker(channel, LiveWorkerRole::Baseline,
+                    state.baseline_quality);
+}
 
-    channel_retry_timers_[channel]->stop();
-    panels_[channel]->resetStats();
-    handleChannelStatus(
-        channel,
-        channel_retry_attempts_[channel] > 0
-            ? QString("RetryConnecting")
-            : QString("Connecting"));
+void MainWindow::startCandidateStream(int channel, LiveQuality quality) {
+    if (channel < 0 || channel >= live_channels_.size() ||
+        !live_desired_running_ || stopping_streams_ || shutting_down_) {
+        return;
+    }
+    auto &state = live_channels_[channel];
+    if (state.candidate_worker) {
+        return;
+    }
+    state.candidate_retry_timer->stop();
+    state.candidate_quality = quality;
+    startLiveWorker(channel, LiveWorkerRole::Candidate, quality);
+}
 
-    auto *worker = new StreamWorker(channel, channelUrl(channel), this);
-    workers_[channel] = worker;
-    worker->setOutputSize(panels_[channel]->videoSurfaceSize());
+void MainWindow::startLiveWorker(int channel,
+                                 LiveWorkerRole role,
+                                 LiveQuality quality) {
+    auto &state = live_channels_[channel];
+    quint64 generation = 0;
+    if (role == LiveWorkerRole::Baseline) {
+        generation = ++state.baseline_generation;
+        state.baseline_status = state.baseline_retry_attempts > 0
+            ? "RetryConnecting" : "Connecting";
+    } else if (role == LiveWorkerRole::Candidate) {
+        generation = ++state.candidate_generation;
+        state.candidate_status = "Opening";
+    } else {
+        return;
+    }
+
+    auto *worker = new StreamWorker(channel, channelUrl(channel, quality), this);
+    if (role == LiveWorkerRole::Baseline) {
+        state.baseline_worker = worker;
+    } else {
+        state.candidate_worker = worker;
+    }
+    qInfo().noquote()
+        << QString("[live-profile] channel=%1 role=%2 quality=%3 state=starting")
+               .arg(channel + 1)
+               .arg(role == LiveWorkerRole::Baseline ? "baseline" : "candidate")
+               .arg(liveQualityName(quality));
+    worker->setOutputSize(liveOutputSize(channel));
     connect(panels_[channel],
             &VideoPanel::renderSizeChanged,
             worker,
-            [worker](const QSize &size) {
-                worker->setOutputSize(size);
+            [this, channel, worker, generation](const QSize &size) {
+                if (liveWorkerRole(channel, worker, generation) !=
+                        LiveWorkerRole::None &&
+                    live_fullscreen_channel_ != channel) {
+                    worker->setOutputSize(size);
+                }
             });
     connect(worker,
             &StreamWorker::frameReady,
             this,
-            [this, channel, panel = panels_[channel], worker](
-                const QImage &image,
-                qint64 queued_at_ms) {
-                if (workers_[channel] != worker) {
-                    worker->markFrameConsumed();
-                    return;
-                }
-                panel->setFrame(image, queued_at_ms);
-                worker->markFrameConsumed();
+            [this, channel, worker, generation](const QImage &image,
+                                                qint64 queued_at_ms) {
+                handleLiveFrame(channel, worker, generation,
+                                image, queued_at_ms);
             },
             Qt::QueuedConnection);
     connect(worker,
             &StreamWorker::statsReady,
             this,
-            [this, channel, worker](const StreamStats &stats) {
-                if (workers_[channel] == worker) {
-                    panels_[channel]->setStreamStats(stats);
-                }
+            [this, channel, worker, generation](const StreamStats &stats) {
+                handleLiveStats(channel, worker, generation, stats);
             },
             Qt::QueuedConnection);
     connect(worker,
             &StreamWorker::statusChanged,
             this,
-            [this, channel, worker](const QString &status) {
-                if (workers_[channel] == worker) {
-                    handleChannelStatus(channel, status);
-                }
+            [this, channel, worker, generation](const QString &status) {
+                handleLiveStatus(channel, worker, generation, status);
             },
             Qt::QueuedConnection);
     connect(worker,
             &StreamWorker::finished,
             this,
-            [this, channel, worker]() {
-                handleLiveWorkerFinished(channel, worker);
+            [this, channel, worker, generation]() {
+                handleLiveWorkerFinished(channel, worker, generation);
             });
+    refreshLivePanelStatus(channel);
     worker->start();
 }
 
-void MainWindow::handleLiveWorkerFinished(int channel,
-                                          StreamWorker *worker) {
-    if (channel < 0 || channel >= workers_.size()) {
-        worker->deleteLater();
-        return;
+MainWindow::LiveWorkerRole MainWindow::liveWorkerRole(
+    int channel, StreamWorker *worker, quint64 generation) const {
+    if (channel < 0 || channel >= live_channels_.size()) {
+        return LiveWorkerRole::None;
     }
-    if (workers_[channel] != worker) {
-        worker->deleteLater();
-        return;
+    const auto &state = live_channels_[channel];
+    if (state.baseline_worker == worker &&
+        state.baseline_generation == generation) {
+        return LiveWorkerRole::Baseline;
     }
+    if (state.candidate_worker == worker &&
+        state.candidate_generation == generation) {
+        return LiveWorkerRole::Candidate;
+    }
+    if (state.foreground_worker == worker &&
+        state.foreground_generation == generation) {
+        return LiveWorkerRole::Foreground;
+    }
+    return LiveWorkerRole::None;
+}
 
-    const QString terminal_status = channel_statuses_[channel];
-    workers_[channel] = nullptr;
-    channel_stable_timers_[channel]->stop();
+void MainWindow::handleLiveFrame(int channel,
+                                 StreamWorker *worker,
+                                 quint64 generation,
+                                 const QImage &image,
+                                 qint64 queued_at_ms) {
+    const LiveWorkerRole role = liveWorkerRole(channel, worker, generation);
+    if (role == LiveWorkerRole::None) {
+        worker->markFrameConsumed();
+        return;
+    }
+    if (stopping_streams_ || shutting_down_) {
+        worker->markFrameConsumed();
+        return;
+    }
+    auto &state = live_channels_[channel];
+    if (role == LiveWorkerRole::Candidate) {
+        promoteCandidate(channel, worker, generation, image, queued_at_ms);
+        worker->markFrameConsumed();
+        return;
+    }
+    if (role == LiveWorkerRole::Baseline) {
+        const bool first_frame = !state.baseline_has_frame;
+        state.baseline_has_frame = true;
+        state.latest_baseline_frame = image;
+        if (state.baseline_quality == LiveQuality::Mobile) {
+            state.latest_mobile_frame = image;
+        }
+        if (!state.foreground_displayed && liveDisplayVisible(channel)) {
+            liveDisplayPanel(channel)->setFrame(image, queued_at_ms);
+        }
+        if (first_frame) {
+            qInfo().noquote()
+                << QString("[live-profile] channel=%1 role=baseline quality=%2 state=displayed_first_frame")
+                       .arg(channel + 1)
+                       .arg(liveQualityName(state.baseline_quality));
+            advanceProfileReadiness(channel);
+        }
+    } else if (state.foreground_displayed && liveDisplayVisible(channel)) {
+        liveDisplayPanel(channel)->setFrame(image, queued_at_ms);
+    }
+    refreshLivePanelStatus(channel);
+    worker->markFrameConsumed();
+}
+
+void MainWindow::handleLiveStats(int channel,
+                                 StreamWorker *worker,
+                                 quint64 generation,
+                                 const StreamStats &stats) {
+    const LiveWorkerRole role = liveWorkerRole(channel, worker, generation);
+    auto &state = live_channels_[channel];
+    if (role == LiveWorkerRole::Baseline) {
+        state.baseline_mbps = stats.recv_mbps;
+        if (!state.foreground_displayed && liveDisplayVisible(channel)) {
+            liveDisplayPanel(channel)->setStreamStats(stats);
+        }
+    } else if (role == LiveWorkerRole::Candidate) {
+        state.candidate_mbps = stats.recv_mbps;
+    } else if (role == LiveWorkerRole::Foreground) {
+        state.foreground_mbps = stats.recv_mbps;
+        if (state.foreground_displayed && liveDisplayVisible(channel)) {
+            liveDisplayPanel(channel)->setStreamStats(stats);
+        }
+    }
+}
+
+void MainWindow::handleLiveStatus(int channel,
+                                  StreamWorker *worker,
+                                  quint64 generation,
+                                  const QString &status) {
+    const LiveWorkerRole role = liveWorkerRole(channel, worker, generation);
+    if (role == LiveWorkerRole::None) {
+        return;
+    }
+    auto &state = live_channels_[channel];
+    QString effective = status;
+    if (role == LiveWorkerRole::Baseline && status == "Opening" &&
+        state.baseline_retry_attempts > 0) {
+        effective = "RetryConnecting";
+    }
+    if (role == LiveWorkerRole::Baseline) {
+        state.baseline_status = effective;
+        if (effective.startsWith("Playing")) {
+            state.baseline_stable_timer->start();
+        } else {
+            state.baseline_stable_timer->stop();
+        }
+    } else if (role == LiveWorkerRole::Candidate) {
+        state.candidate_status = effective;
+    } else {
+        state.foreground_status = effective;
+        if (effective.startsWith("Playing")) {
+            state.foreground_stable_timer->start();
+        } else {
+            state.foreground_stable_timer->stop();
+        }
+    }
+    const bool hard_failure =
+        effective.contains("failed", Qt::CaseInsensitive) ||
+        effective.contains("error", Qt::CaseInsensitive) ||
+        effective.contains("timeout", Qt::CaseInsensitive) ||
+        effective.startsWith("read ended");
+    if (role == LiveWorkerRole::Foreground && hard_failure) {
+        state.foreground_displayed = false;
+        showBaselineFrame(channel);
+    }
+    qInfo().noquote()
+        << QString("[ch%1] role=%2 status=%3")
+               .arg(channel + 1)
+               .arg(role == LiveWorkerRole::Baseline ? "baseline" :
+                    role == LiveWorkerRole::Candidate ? "candidate" : "foreground")
+               .arg(effective);
+    refreshLivePanelStatus(channel);
+    refreshConnectionSummary();
+}
+
+void MainWindow::promoteCandidate(int channel,
+                                  StreamWorker *worker,
+                                  quint64 generation,
+                                  const QImage &first_frame,
+                                  qint64 queued_at_ms) {
+    if (liveWorkerRole(channel, worker, generation) !=
+        LiveWorkerRole::Candidate) {
+        return;
+    }
+    auto &state = live_channels_[channel];
+    const LiveQuality quality = state.candidate_quality;
+    const QString status = state.candidate_status;
+    const double mbps = state.candidate_mbps;
+    state.candidate_worker = nullptr;
+    state.candidate_status = "Stopped";
+    state.candidate_mbps = 0.0;
+    state.candidate_retry_timer->stop();
+    state.candidate_retry_attempts = 0;
+
+    if (channel == live_fullscreen_channel_ &&
+        quality == LiveQuality::High) {
+        stopForegroundStream(channel);
+        state.foreground_worker = worker;
+        state.foreground_generation = generation;
+        state.foreground_quality = quality;
+        state.foreground_status = status;
+        state.foreground_mbps = mbps;
+        state.foreground_displayed = true;
+    } else {
+        StreamWorker *old_baseline = state.baseline_worker;
+        state.baseline_worker = worker;
+        state.baseline_generation = generation;
+        state.baseline_quality = quality;
+        state.baseline_status = status;
+        state.baseline_mbps = mbps;
+        state.baseline_has_frame = true;
+        cancelChannelRetry(channel, LiveWorkerRole::Baseline, false);
+        if (status.startsWith("Playing")) {
+            state.baseline_stable_timer->start();
+        }
+        state.latest_baseline_frame = first_frame;
+        if (quality == LiveQuality::Mobile) {
+            state.latest_mobile_frame = first_frame;
+        }
+        if (old_baseline && old_baseline != worker) {
+            retiring_live_workers_.insert(old_baseline);
+            old_baseline->stop();
+        }
+    }
+    if (liveDisplayVisible(channel)) {
+        liveDisplayPanel(channel)->clearStreamMetrics();
+        liveDisplayPanel(channel)->setFrame(first_frame, queued_at_ms);
+    }
+    qInfo().noquote()
+        << QString("[live-profile] channel=%1 quality=%2 state=promoted_after_first_frame")
+               .arg(channel + 1)
+               .arg(liveQualityName(quality));
+    refreshLivePanelStatus(channel);
+    if (!state.foreground_displayed) {
+        advanceProfileReadiness(channel);
+    }
+}
+
+void MainWindow::advanceProfileReadiness(int channel) {
+    if (channel < 0 || channel >= live_channels_.size() ||
+        !live_desired_running_ || stopping_streams_ || shutting_down_) {
+        return;
+    }
+    auto &state = live_channels_[channel];
+    if (!state.baseline_worker || !state.baseline_has_frame) {
+        return;
+    }
+    LiveQuality target;
+    bool needs_candidate = true;
+    if (channel == live_fullscreen_channel_) {
+        if (state.baseline_quality == LiveQuality::High) {
+            needs_candidate = false;
+        } else {
+            target = LiveQuality::High;
+        }
+    } else if (state.baseline_quality == LiveQuality::High) {
+        target = LiveQuality::Standard;
+    } else if (state.baseline_quality == LiveQuality::Standard) {
+        target = LiveQuality::Mobile;
+    } else {
+        needs_candidate = false;
+    }
+    if (!needs_candidate) {
+        if (state.candidate_worker) {
+            stopCandidateStream(channel);
+        }
+        refreshLivePanelStatus(channel);
+        return;
+    }
+    if (state.candidate_worker && state.candidate_quality == target) {
+        return;
+    }
+    if (state.candidate_worker) {
+        stopCandidateStream(channel);
+    }
+    state.candidate_quality = target;
+    startCandidateStream(channel, target);
+}
+
+void MainWindow::resumeAutomaticProfile(int channel) {
+    if (channel < 0 || channel >= live_channels_.size()) {
+        return;
+    }
+    auto &state = live_channels_[channel];
+    if (state.foreground_worker) {
+        stopForegroundStream(channel);
+    }
+    showBaselineFrame(channel);
+    advanceProfileReadiness(channel);
+}
+
+void MainWindow::stopCandidateStream(int channel) {
+    if (channel < 0 || channel >= live_channels_.size()) {
+        return;
+    }
+    auto &state = live_channels_[channel];
+    cancelChannelRetry(channel, LiveWorkerRole::Candidate, false);
+    StreamWorker *worker = state.candidate_worker;
+    state.candidate_worker = nullptr;
+    ++state.candidate_generation;
+    state.candidate_status = "Stopped";
+    state.candidate_mbps = 0.0;
+    if (worker) {
+        retiring_live_workers_.insert(worker);
+        worker->stop();
+    }
+}
+
+void MainWindow::stopForegroundStream(int channel) {
+    if (channel < 0 || channel >= live_channels_.size()) {
+        return;
+    }
+    auto &state = live_channels_[channel];
+    StreamWorker *worker = state.foreground_worker;
+    state.foreground_worker = nullptr;
+    ++state.foreground_generation;
+    state.foreground_displayed = false;
+    state.foreground_status = "Stopped";
+    state.foreground_mbps = 0.0;
+    state.foreground_stable_timer->stop();
+    if (worker) {
+        retiring_live_workers_.insert(worker);
+        worker->stop();
+    }
+    showBaselineFrame(channel);
+}
+
+void MainWindow::handleLiveWorkerFinished(int channel,
+                                          StreamWorker *worker,
+                                          quint64 generation) {
+    if (channel < 0 || channel >= live_channels_.size()) {
+        worker->deleteLater();
+        return;
+    }
+    auto &state = live_channels_[channel];
+    const LiveWorkerRole role = liveWorkerRole(channel, worker, generation);
+    if (role == LiveWorkerRole::None) {
+        retiring_live_workers_.remove(worker);
+        worker->deleteLater();
+        finalizeLiveStopIfReady();
+        return;
+    }
+    QString terminal_status;
+    if (role == LiveWorkerRole::Baseline) {
+        terminal_status = state.baseline_status;
+        state.baseline_worker = nullptr;
+        state.baseline_mbps = 0.0;
+        state.baseline_has_frame = false;
+        state.baseline_stable_timer->stop();
+    } else if (role == LiveWorkerRole::Candidate) {
+        terminal_status = state.candidate_status;
+        state.candidate_worker = nullptr;
+        state.candidate_mbps = 0.0;
+    } else {
+        terminal_status = state.foreground_status;
+        state.foreground_worker = nullptr;
+        state.foreground_mbps = 0.0;
+        state.foreground_displayed = false;
+        state.foreground_stable_timer->stop();
+    }
     worker->deleteLater();
 
     if (stopping_streams_) {
-        if (activeLiveWorkerCount() == 0) {
-            const bool should_restart =
-                restart_after_stop_ && live_desired_running_ &&
-                !shutting_down_;
-            finalizeStoppedState();
-            stopping_streams_ = false;
-            restart_after_stop_ = false;
-            if (should_restart) {
-                start_button_->setText("다시 연결 중");
-                start_button_->setEnabled(false);
-                QTimer::singleShot(0, this, &MainWindow::startStreams);
-            }
-            if (page_stack_->currentIndex() == 1 &&
-                pending_playback_api_action_ ==
-                    kPlaybackApiActionTimeline) {
-                QTimer::singleShot(0, this, [this]() {
-                    if (pending_playback_api_action_ ==
-                        kPlaybackApiActionTimeline) {
-                        performPlaybackApiAction(
-                            kPlaybackApiActionTimeline);
-                    }
-                });
-            }
+        finalizeLiveStopIfReady();
+    } else if (role == LiveWorkerRole::Baseline) {
+        if (live_desired_running_ && terminal_status != "Stopped") {
+            scheduleChannelRetry(channel, LiveWorkerRole::Baseline,
+                                 terminal_status);
         }
-    } else if (live_desired_running_ && !shutting_down_ &&
-               terminal_status != "Stopped") {
-        scheduleChannelRetry(channel, terminal_status);
+    } else if (role == LiveWorkerRole::Candidate) {
+        if (live_desired_running_ && terminal_status != "Stopped") {
+            scheduleChannelRetry(channel, LiveWorkerRole::Candidate,
+                                 terminal_status);
+        }
+    } else {
+        showBaselineFrame(channel);
+        if (channel == live_fullscreen_channel_ && live_desired_running_ &&
+            terminal_status != "Stopped") {
+            state.candidate_quality = LiveQuality::High;
+            scheduleChannelRetry(channel, LiveWorkerRole::Candidate,
+                                 terminal_status);
+        } else {
+            advanceProfileReadiness(channel);
+        }
     }
+    refreshLivePanelStatus(channel);
     refreshConnectionSummary();
 }
 
 void MainWindow::scheduleChannelRetry(int channel,
+                                      LiveWorkerRole role,
                                       const QString &reason) {
-    if (channel < 0 || channel >= channel_retry_timers_.size() ||
-        !live_desired_running_ || stopping_streams_ || shutting_down_ ||
-        workers_[channel]) {
+    if (channel < 0 || channel >= live_channels_.size() ||
+        !live_desired_running_ || stopping_streams_ || shutting_down_) {
         return;
     }
-
-    channel_stable_timers_[channel]->stop();
-    const int attempt = ++channel_retry_attempts_[channel];
+    auto &state = live_channels_[channel];
+    if ((role == LiveWorkerRole::Baseline && state.baseline_worker) ||
+        (role == LiveWorkerRole::Candidate && state.candidate_worker) ||
+        (role != LiveWorkerRole::Baseline &&
+         role != LiveWorkerRole::Candidate)) {
+        return;
+    }
+    QTimer *retry_timer = role == LiveWorkerRole::Candidate
+        ? state.candidate_retry_timer : state.baseline_retry_timer;
+    int &attempts = role == LiveWorkerRole::Candidate
+        ? state.candidate_retry_attempts : state.baseline_retry_attempts;
+    const int attempt = ++attempts;
     const int delay_ms = channelRetryDelayMs(attempt);
     const int display_seconds = qMax(1, qRound(delay_ms / 1000.0));
-    handleChannelStatus(
-        channel,
-        QString("RetryWaiting:%1").arg(display_seconds));
-    channel_retry_timers_[channel]->start(delay_ms);
+    if (role == LiveWorkerRole::Candidate) {
+        state.candidate_status =
+            QString("RetryWaiting:%1").arg(display_seconds);
+    } else {
+        state.baseline_status =
+            QString("RetryWaiting:%1").arg(display_seconds);
+    }
+    refreshLivePanelStatus(channel);
+    retry_timer->start(delay_ms);
     qInfo().noquote()
-        << QString("[live-retry] channel=%1 state=scheduled attempt=%2 delay_ms=%3 reason=%4")
+        << QString("[live-retry] channel=%1 role=%2 state=scheduled attempt=%3 delay_ms=%4 reason=%5")
                .arg(channel + 1)
+               .arg(role == LiveWorkerRole::Candidate ? "candidate" : "baseline")
                .arg(attempt)
                .arg(delay_ms)
                .arg(reason);
 }
 
-void MainWindow::cancelChannelRetry(int channel, bool reset_attempt) {
-    if (channel < 0 || channel >= channel_retry_timers_.size()) {
+void MainWindow::cancelChannelRetry(int channel,
+                                    LiveWorkerRole role,
+                                    bool reset_attempt) {
+    if (channel < 0 || channel >= live_channels_.size()) {
         return;
     }
-    channel_retry_timers_[channel]->stop();
-    channel_stable_timers_[channel]->stop();
+    auto &state = live_channels_[channel];
+    QTimer *retry_timer = role == LiveWorkerRole::Candidate
+        ? state.candidate_retry_timer : state.baseline_retry_timer;
+    retry_timer->stop();
+    if (role == LiveWorkerRole::Baseline) {
+        state.baseline_stable_timer->stop();
+    }
     if (reset_attempt) {
-        channel_retry_attempts_[channel] = 0;
+        (role == LiveWorkerRole::Candidate
+             ? state.candidate_retry_attempts
+             : state.baseline_retry_attempts) = 0;
     }
 }
 
 void MainWindow::cancelAllChannelRetries(bool reset_attempts) {
-    for (int channel = 0; channel < channel_retry_timers_.size(); ++channel) {
-        cancelChannelRetry(channel, reset_attempts);
+    for (int channel = 0; channel < live_channels_.size(); ++channel) {
+        cancelChannelRetry(channel, LiveWorkerRole::Baseline,
+                           reset_attempts);
+        cancelChannelRetry(channel, LiveWorkerRole::Candidate,
+                           reset_attempts);
     }
 }
 
@@ -4067,29 +4602,162 @@ int MainWindow::channelRetryDelayMs(int attempt) const {
     return qMax(250, base_ms + jitter);
 }
 
-void MainWindow::handleChannelStatus(int channel, const QString &status) {
-    if (channel < 0 || channel >= panels_.size()) {
+VideoPanel *MainWindow::liveDisplayPanel(int channel) const {
+    if (channel == live_fullscreen_channel_ &&
+        live_fullscreen_window_ && live_fullscreen_window_->isVisible()) {
+        return live_fullscreen_panel_;
+    }
+    return panels_[channel];
+}
+
+bool MainWindow::liveDisplayVisible(int channel) const {
+    if (live_fullscreen_channel_ >= 0) {
+        return channel == live_fullscreen_channel_ &&
+               live_fullscreen_window_->isVisible();
+    }
+    return page_stack_->currentIndex() == 0;
+}
+
+QSize MainWindow::liveOutputSize(int channel) const {
+    return liveDisplayPanel(channel)->videoSurfaceSize();
+}
+
+void MainWindow::showBaselineFrame(int channel) {
+    if (channel < 0 || channel >= live_channels_.size()) {
         return;
     }
-    QString effective_status = status;
-    if (status == "Opening" && channel_retry_attempts_[channel] > 0) {
-        effective_status = "RetryConnecting";
+    auto &state = live_channels_[channel];
+    state.foreground_displayed = false;
+    if (!state.latest_baseline_frame.isNull() &&
+        liveDisplayVisible(channel)) {
+        VideoPanel *panel = liveDisplayPanel(channel);
+        panel->clearStreamMetrics();
+        panel->setFrame(state.latest_baseline_frame,
+            QDateTime::currentMSecsSinceEpoch());
     }
-    if (channel_statuses_[channel] == effective_status) {
+    refreshLivePanelStatus(channel);
+}
+
+void MainWindow::refreshLivePanelStatus(int channel) {
+    if (channel < 0 || channel >= live_channels_.size()) {
         return;
     }
-    channel_statuses_[channel] = effective_status;
-    panels_[channel]->setStatus(effective_status);
-    if (effective_status.startsWith("Playing")) {
-        channel_stable_timers_[channel]->start();
+    const auto &state = live_channels_[channel];
+    QString status;
+    QString badge = liveQualityName(state.baseline_quality);
+    if (state.foreground_displayed && state.foreground_worker) {
+        badge = liveQualityName(state.foreground_quality);
+        status = QString("QualityPlaying:%1")
+                     .arg(badge);
+    } else if (state.candidate_worker ||
+               state.candidate_retry_timer->isActive()) {
+        if (state.candidate_retry_timer->isActive()) {
+            status = QString("QualityRetry:%1:%2:%3")
+                         .arg(liveQualityName(state.candidate_quality))
+                         .arg(qMax(1,
+                                   state.candidate_retry_timer
+                                           ->remainingTime() /
+                                       1000))
+                         .arg(badge);
+        } else {
+            status = QString("Preparing:%1:%2")
+                         .arg(liveQualityName(state.candidate_quality),
+                              badge);
+        }
+    } else if (state.baseline_has_frame) {
+        status = QString("QualityPlaying:%1").arg(badge);
     } else {
-        channel_stable_timers_[channel]->stop();
+        status = state.baseline_status;
     }
-    qInfo().noquote()
-        << QString("[ch%1] status=%2")
-               .arg(channel + 1)
-               .arg(effective_status);
-    refreshConnectionSummary();
+    const QString badge_text =
+        !state.baseline_has_frame && !state.foreground_displayed
+            ? QString("%1 준비 중").arg(badge)
+            : badge;
+    panels_[channel]->setQualityBadgeText(badge_text);
+    panels_[channel]->setStatusPreservingFrame(status);
+    if (channel == live_fullscreen_channel_ &&
+        live_fullscreen_panel_) {
+        live_fullscreen_panel_->setQualityBadgeText(badge_text);
+        live_fullscreen_panel_->setStatusPreservingFrame(status);
+    }
+}
+
+void MainWindow::toggleLiveFullscreen(int channel) {
+    if (live_fullscreen_window_->isVisible() &&
+        live_fullscreen_channel_ == channel) {
+        closeLiveFullscreen();
+        return;
+    }
+    if (live_fullscreen_window_->isVisible()) {
+        closeLiveFullscreen();
+    }
+    if (channel < 0 || channel >= live_channels_.size()) {
+        return;
+    }
+
+    live_fullscreen_channel_ = channel;
+    live_fullscreen_panel_->setChannel(channel);
+    live_fullscreen_panel_->setTitle(
+        QString("CH %1 · LIVE").arg(channel + 1));
+    live_fullscreen_panel_->setQualityBadgeText("High 준비 중");
+    const QImage current = panels_[channel]->currentImage();
+    if (!current.isNull()) {
+        live_fullscreen_panel_->setPreviewImage(current);
+    }
+    live_fullscreen_window_->showFullScreen();
+    live_fullscreen_window_->raise();
+    live_fullscreen_window_->activateWindow();
+    showBaselineFrame(channel);
+    advanceProfileReadiness(channel);
+    QTimer::singleShot(0, this, [this, channel]() {
+        if (live_fullscreen_channel_ != channel) {
+            return;
+        }
+        const QSize size = live_fullscreen_panel_->videoSurfaceSize();
+        auto &state = live_channels_[channel];
+        if (state.baseline_worker) {
+            state.baseline_worker->setOutputSize(size);
+        }
+        if (state.candidate_worker) {
+            state.candidate_worker->setOutputSize(size);
+        }
+        if (state.foreground_worker) {
+            state.foreground_worker->setOutputSize(size);
+        }
+    });
+}
+
+void MainWindow::closeLiveFullscreen() {
+    if (!live_fullscreen_window_ ||
+        !live_fullscreen_window_->isVisible()) {
+        return;
+    }
+    const int channel = live_fullscreen_channel_;
+    live_fullscreen_window_->hide();
+    live_fullscreen_channel_ = -1;
+    if (channel < 0 || channel >= live_channels_.size()) {
+        return;
+    }
+    auto &state = live_channels_[channel];
+    if (state.foreground_worker) {
+        stopForegroundStream(channel);
+    }
+    if (state.candidate_worker &&
+        state.candidate_quality == LiveQuality::High) {
+        stopCandidateStream(channel);
+    }
+    showBaselineFrame(channel);
+    resumeAutomaticProfile(channel);
+    const QSize size = panels_[channel]->videoSurfaceSize();
+    if (state.baseline_worker) {
+        state.baseline_worker->setOutputSize(size);
+    }
+    if (state.candidate_worker) {
+        state.candidate_worker->setOutputSize(size);
+    }
+    if (state.foreground_worker) {
+        state.foreground_worker->setOutputSize(size);
+    }
 }
 
 void MainWindow::refreshConnectionSummary() {
@@ -4097,11 +4765,13 @@ void MainWindow::refreshConnectionSummary() {
     int errors = 0;
     int retrying = 0;
     int retry_channel = -1;
-    for (int channel = 0; channel < channel_statuses_.size(); ++channel) {
-        const QString &status = channel_statuses_[channel];
-        if (status.startsWith("Playing")) {
+    for (int channel = 0; channel < live_channels_.size(); ++channel) {
+        const auto &state = live_channels_[channel];
+        const QString &status = state.baseline_status;
+        if (state.baseline_has_frame && state.baseline_worker) {
             ++playing;
-        } else if (status.startsWith("Retry")) {
+        } else if (status.startsWith("Retry") ||
+                   state.baseline_retry_timer->isActive()) {
             ++retrying;
             retry_channel = channel;
         } else if (status.contains("failed", Qt::CaseInsensitive) ||
@@ -4149,8 +4819,9 @@ void MainWindow::refreshConnectionSummary() {
 
 void MainWindow::updateTotalStats() {
     double total_mbps = 0.0;
-    for (auto *panel : panels_) {
-        total_mbps += panel->lastMbps();
+    for (const auto &state : live_channels_) {
+        total_mbps += state.baseline_mbps + state.candidate_mbps +
+                      state.foreground_mbps;
     }
     total_stats_label_->setText(QString("수신 %1 Mbps").arg(total_mbps, 0, 'f', 2));
     updateServerTimeDisplay();

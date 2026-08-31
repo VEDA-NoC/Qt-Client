@@ -104,16 +104,26 @@
 
 ### 화면별 영상 자원 정책
 
-- 녹화 재생 화면에 들어가면 live 4채널 worker를 중지한다.
+- N2부터 각 live 채널은 Pi의 준비 순서와 같은 `High → Standard → Mobile` 순서로
+  연결한다. 현재 profile을 baseline으로 계속 표시한 채 다음 profile을 candidate로
+  열고, candidate의 첫 decoded frame에서만 baseline을 교체한다.
+- Mobile 승격 뒤에는 `/chN/mobile` baseline worker를 앱의 명시적 전체 중지 전까지
+  유지한다. 녹화 재생 화면에 들어가도 네 연결과 채널별 retry를 중지하지 않는다.
+- 전체화면에서는 Mobile baseline을 유지한 채 High candidate를 연결한다. High 첫
+  frame에서만 foreground로 표시하고, 전체화면 종료나 High hard failure 시 최신
+  Mobile frame으로 즉시 복귀한다.
 - 녹화 재생 화면을 나가면 playback을 현재 PTS에서 일시정지한다.
-- 실시간 모니터링 화면으로 돌아갈 때 live 4채널을 다시 연결한다.
-- 숨겨진 `VideoPanel`이 계속 decode·scale하지 않도록 하여 `4 live + 1 playback`
-  동시 실행을 기본 동작에서 제외한다.
+- 실시간 모니터링 화면으로 돌아갈 때 각 baseline worker가 보관한 최신 decoded
+  `QImage`를 즉시 표시한다. baseline 재연결을 기다리지 않는다.
+- playback 화면에서는 숨겨진 live `VideoPanel`을 매 frame 갱신하지 않는다. 아직
+  Mobile까지 준비되지 않은 채널은 준비 전환을 계속하고, Mobile worker가 최신
+  decoded `QImage` 한 장만 교체한다. 안정 상태의 기본 동시 실행 범위는
+  `4 Mobile baseline + 1 playback`이다.
 - 재생 worker가 없는 상태에서는 이전 수신·패킷·decode·UI 지표를 0으로 초기화한다.
 - `UI 처리 fps`와 실제 unique pixmap `화면 갱신 fps`를 구분해 표시한다.
 
-운영 요구상 live와 playback을 동시에 유지해야 한다면 하드웨어 decoder 또는
-substream 도입 후 별도 성능 측정으로 다시 결정한다.
+Mobile baseline 네 개와 playback 하나의 동시 CPU/RSS 한계는 사용자 실기에서
+확인한다. 자동 ABR, hardware decoder와 GPU renderer는 N2 범위에 포함하지 않는다.
 
 ### Qt 표시 성능 정책
 
@@ -125,9 +135,17 @@ substream 도입 후 별도 성능 측정으로 다시 결정한다.
 - live 4채널의 고해상도 RGB frame을 GUI thread에서 매 frame 축소하는 구조는
   사용하지 않는다.
 
-Pi에 live substream이 구현되면 화면 전환 때 연결을 끊는 대신 live 화면 밖에서는
-저품질 substream을 유지하거나 전환하는 정책을 우선 검토한다. 현재 stop/reconnect는
-Pi가 단일 profile만 제공하는 단계의 임시 정책이다.
+Pi의 live profile route는 `High`, `Standard`, `Mobile`이며 Qt는 route 이름으로
+codec을 가정하지 않는다. 채널별 수동 selector는 두지 않고 현재 표시 profile을
+비조작 badge로만 알린다. readiness 전환과 전체화면 High 전환은 모두 첫 decoded
+frame 기준 make-before-break이며 candidate 실패는 현재 표시 worker와 frame을
+중지하거나 지우지 않는다. 자동 ABR은 아니며 서버 준비 순서를 따라 Mobile warm
+baseline까지 한 방향으로 내려가는 정책이다.
+
+live decoder는 일시적인 `AVERROR_INVALIDDATA` packet 한 건으로 worker를 종료하지
+않는다. 첫 frame 전에는 기존 15초 deadline까지 유효 frame을 기다리고, Playing 뒤에는
+마지막 정상 decoded frame부터 5초간 frame이 없을 때만 decode stall로 재연결한다.
+녹화 손상을 숨기지 않도록 playback decoder의 오류 정책은 기존 fatal 처리를 유지한다.
 
 ### 반응형 영상과 재생 조작
 

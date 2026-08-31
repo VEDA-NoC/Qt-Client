@@ -16,7 +16,7 @@ Codex는 Qt 코드를 작성하지만 사용자 Windows 환경에서 빌드·실
 - 재선택·일시정지 재개·1초 seek 시 새 session 발급
 - `Space`, 좌우 방향키, `F11`, `Esc`, 영상 더블클릭 단축 조작
 - Timeline 클릭 시 JPEG thumbnail preview
-- 화면 전환 시 live/playback worker 상호 중지로 decode 자원 격리
+- playback 중에도 live Mobile baseline 4개 유지 및 live 복귀 즉시 최신 frame 표시
 
 Export, 배속과 역재생은 이번 범위가 아니다.
 
@@ -71,8 +71,9 @@ cmake --build build-codex-mingw --parallel 8
     중지한 시각 부근에서 이어져야 한다.
 14. 좌우 방향키로 1초씩 이동한다. 녹화가 없는 시각은 경고를 표시한다.
 15. `F11` 또는 영상 더블클릭으로 전체화면을 전환하고 `Esc`로 복귀한다.
-16. 재생 화면에 들어가면 live `[ch1]`~`[ch4]` worker가 `Stopped`가 되고,
-    live 화면으로 돌아가면 다시 연결되는지 확인한다.
+16. 재생 화면에 들어가도 live `/ch1/mobile`~`/ch4/mobile` worker 네 개가
+    `Playing`을 유지하는지 확인한다. live 화면으로 돌아오면 새 `Opening` 없이
+    보관한 최신 Mobile frame이 즉시 표시되어야 한다.
 17. 타임라인의 서로 다른 시각을 빠르게 클릭해도 마지막으로 선택한 시각의
     thumbnail만 표시되는지 확인한다.
 18. 인증서를 적용하지 않은 새 실행에서는 날짜·시간·범위·이동·조회 control이 모두
@@ -127,13 +128,38 @@ cmake --build build-codex-mingw --parallel 8
 
 1. live 화면에서 4채널을 60초 유지한다.
 2. 각 채널의 `decode_fps`, `ui_fps`, `paint_fps`, `UI 큐`를 기록한다.
-3. playback 화면에서 VOD를 60초 재생한다.
+3. Mobile baseline 네 개가 유지된 상태로 playback VOD를 60초 재생한다.
 4. live 화면으로 돌아와 다시 60초 기록한다.
 
 목표는 30 fps source에서 `paint_fps`가 지속적으로 decode의 절반 이하로 떨어지지
 않고, `UI 큐`가 수백 ms로 계속 누적되지 않는 것이다. 화면별 worker 격리 후에도
 `paint_fps 11~16`, `UI 큐 200 ms 이상`이 반복되면 Qt GUI scaling 경로와
 hardware decode 전환을 다음 병목으로 분석한다.
+
+## N2 live 품질 전환 테스트
+
+1. 실시간 2×2 화면에서 CH1~CH4가 `/chN/high`로 먼저 영상을 표시하는지 확인한다.
+   이후 각 채널이 기존 영상을 유지한 채 `Standard 준비 중 · High 표시`,
+   `Mobile 준비 중 · Standard 표시` 순서로 전환되고 최종적으로 네
+   `/chN/mobile` session만 유지되어야 한다.
+2. CH1 영상을 더블클릭한다. Mobile 영상이 지워지지 않은 채
+   `High 준비 중 · Mobile 표시`가 보이고, `/ch1/high` 첫 frame 뒤 High로 바뀌어야 한다.
+3. `Esc` 또는 영상을 다시 더블클릭한다. 전체화면을 닫자마자 최신 Mobile frame이
+   표시되어야 한다.
+4. `/ch1/high` route를 실패시키고 전체화면에 진입한다. 검은 화면 없이 Mobile을
+   계속 표시하며 foreground retry가 backoff로 반복되어야 한다.
+5. `/ch1/standard` 또는 `/ch1/mobile` 준비를 지연·실패시킨다. candidate retry 중에도
+   직전 High 또는 Standard 영상이 계속 표시되고 late frame이 화면을 덮지 않아야 한다.
+   CH2 Standard처럼 일부 H.264 packet에서 `AVERROR_INVALIDDATA`가 발생하는 경우에는
+   `[stream-decode] ... state=packet_dropped`가 출력되더라도 정상 frame이 이어지는 동안
+   worker retry와 화면 정지가 없어야 한다. 정상 decoded frame이 5초간 완전히 끊기면
+   `decode stall timeout after 5000 ms` 뒤 해당 worker만 retry해야 한다.
+6. 녹화 재생에 들어가 VOD를 재생하는 동안 Pi에서 Mobile session 네 개가 유지되는지
+   확인한다. live 복귀 시 2~3초 재접속 대기 없이 영상이 보여야 한다.
+7. `중지`, RTSPS URL 재적용, 로그아웃을 각각 수행해 관련 live worker와 retry가
+   종료되는지 확인한다.
+8. High 연결 중 또는 retry 대기 중 앱을 종료한다. 종료 지연 후 crash, 남은 thread,
+   종료 뒤 retry 로그가 없어야 한다.
 
 변경 후 `[ui-chN]` 로그의 `frame=`은 원본 `2592x1520`이 아니라 panel에 맞춘
 출력 크기여야 한다. 원본 크기가 계속 표시되면 worker output size 전달이 적용되지
@@ -142,6 +168,16 @@ hardware decode 전환을 다음 병목으로 분석한다.
 ## 정상 핵심 출력
 
 ```text
+[live-profile] channel=1 role=baseline quality=High state=starting
+[stream-open] channel=1 mode=live route=/ch1/high state=open_success
+[stream-open] channel=1 mode=live route=/ch1/high state=stream_info codec=h264
+[stream-open] channel=1 mode=live route=/ch1/high state=decoder_open codec=h264
+[stream-open] channel=1 mode=live route=/ch1/high state=first_video_packet bytes=...
+[stream-open] channel=1 mode=live route=/ch1/high state=first_decoded_frame elapsed_ms=... recoverable_errors=...
+[live-profile] channel=1 role=candidate quality=Standard state=starting
+[live-profile] channel=1 quality=Standard state=promoted_after_first_frame
+[live-profile] channel=1 role=candidate quality=Mobile state=starting
+[live-profile] channel=1 quality=Mobile state=promoted_after_first_frame
 [playback-api] login succeeded expires_in=...
 [playback-api] timeline channel=1 spans=... events=...
 [playback-api] session created channel=1 duration_ms=... segments=...
