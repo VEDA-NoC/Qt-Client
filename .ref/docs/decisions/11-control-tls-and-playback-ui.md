@@ -104,19 +104,24 @@
 
 ### 화면별 영상 자원 정책
 
-- N2부터 각 live 채널은 Pi의 준비 순서와 같은 `High → Standard → Mobile` 순서로
-  연결한다. 현재 profile을 baseline으로 계속 표시한 채 다음 profile을 candidate로
-  열고, candidate의 첫 decoded frame에서만 baseline을 교체한다.
-- Mobile 승격 뒤에는 `/chN/mobile` baseline worker를 앱의 명시적 전체 중지 전까지
-  유지한다. 녹화 재생 화면에 들어가도 네 연결과 채널별 retry를 중지하지 않는다.
-- 전체화면에서는 Mobile baseline을 유지한 채 High candidate를 연결한다. High 첫
+- N2부터 live 화면 진입 시 각 채널은 Pi의 준비 순서에 맞춰 High로 먼저 연결하고
+  Standard candidate의 첫 decoded frame에서 baseline을 교체한다. live 화면의 자동
+  품질 하한은 Standard이며 Mobile로 더 내려가지 않는다.
+- live 이외의 페이지로 이동하면 현재 Standard 또는 High baseline을 유지한 채 Mobile
+  candidate를 열고, 첫 decoded frame 뒤에만 Mobile baseline으로 교체한다. playback,
+  이벤트, 장치·제어, 설정과 주차 구역 편집 중에는 네 Mobile 연결과 retry를 유지한다.
+- live 화면으로 돌아오면 최신 Mobile frame을 즉시 표시한 채 Standard candidate를
+  연결하고, Standard 첫 decoded frame에서 교체한다. Standard가 실패하면 Mobile
+  화면과 연결을 유지한다.
+- 전체화면에서는 Standard baseline을 유지한 채 High candidate를 연결한다. High 첫
   frame에서만 foreground로 표시하고, 전체화면 종료나 High hard failure 시 최신
-  Mobile frame으로 즉시 복귀한다.
+  Standard frame으로 복귀한다. Standard가 아직 준비되지 않았다면 현재 Mobile
+  baseline을 유지한 채 Standard 전환을 계속한다.
 - 녹화 재생 화면을 나가면 playback을 현재 PTS에서 일시정지한다.
 - 실시간 모니터링 화면으로 돌아갈 때 각 baseline worker가 보관한 최신 decoded
   `QImage`를 즉시 표시한다. baseline 재연결을 기다리지 않는다.
-- playback 화면에서는 숨겨진 live `VideoPanel`을 매 frame 갱신하지 않는다. 아직
-  Mobile까지 준비되지 않은 채널은 준비 전환을 계속하고, Mobile worker가 최신
+- background 화면에서는 숨겨진 live `VideoPanel`을 매 frame 갱신하지 않는다. 아직
+  Mobile이 준비되지 않은 채널은 기존 baseline을 유지하고, Mobile worker가 최신
   decoded `QImage` 한 장만 교체한다. 안정 상태의 기본 동시 실행 범위는
   `4 Mobile baseline + 1 playback`이다.
 - 재생 worker가 없는 상태에서는 이전 수신·패킷·decode·UI 지표를 0으로 초기화한다.
@@ -137,10 +142,9 @@ Mobile baseline 네 개와 playback 하나의 동시 CPU/RSS 한계는 사용자
 
 Pi의 live profile route는 `High`, `Standard`, `Mobile`이며 Qt는 route 이름으로
 codec을 가정하지 않는다. 채널별 수동 selector는 두지 않고 현재 표시 profile을
-비조작 badge로만 알린다. readiness 전환과 전체화면 High 전환은 모두 첫 decoded
-frame 기준 make-before-break이며 candidate 실패는 현재 표시 worker와 frame을
-중지하거나 지우지 않는다. 자동 ABR은 아니며 서버 준비 순서를 따라 Mobile warm
-baseline까지 한 방향으로 내려가는 정책이다.
+비조작 badge로만 알린다. live의 Standard, background의 Mobile, 전체화면의 High
+전환은 모두 첫 decoded frame 기준 make-before-break이며 candidate 실패는 현재 표시
+worker와 frame을 중지하거나 지우지 않는다. 자동 ABR은 아니다.
 
 live decoder는 일시적인 `AVERROR_INVALIDDATA` packet 한 건으로 worker를 종료하지
 않는다. 첫 frame 전에는 기존 15초 deadline까지 유효 frame을 기다리고, Playing 뒤에는

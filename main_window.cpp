@@ -2165,8 +2165,12 @@ void MainWindow::setCurrentPage(int page_index) {
     if (previous_page == 1 && page_index != 1 && playback_worker_) {
         togglePlaybackPause();
     }
+    page_stack_->setCurrentIndex(page_index);
     if (previous_page == 0 && page_index != 0) {
         closeLiveFullscreen();
+        for (int channel = 0; channel < live_channels_.size(); ++channel) {
+            resumeAutomaticProfile(channel);
+        }
     } else if (page_index == 0) {
         if (!live_desired_running_ && activeLiveWorkerCount() == 0 &&
             !stopping_streams_) {
@@ -2178,7 +2182,6 @@ void MainWindow::setCurrentPage(int page_index) {
             }
         }
     }
-    page_stack_->setCurrentIndex(page_index);
     page_title_label_->setText(kPageTitles[page_index]);
     page_subtitle_label_->setText(kPageSubtitles[page_index]);
     stream_controls_->setVisible(page_index == 0);
@@ -3943,7 +3946,7 @@ void MainWindow::startStreams() {
         auto &state = live_channels_[channel];
         state.baseline_quality = LiveQuality::High;
         state.candidate_quality = LiveQuality::Standard;
-        state.foreground_quality = LiveQuality::Mobile;
+        state.foreground_quality = LiveQuality::High;
         state.latest_baseline_frame = QImage();
         state.latest_mobile_frame = QImage();
         state.baseline_status = "Stopped";
@@ -4004,7 +4007,7 @@ void MainWindow::finalizeStoppedState() {
         state.latest_mobile_frame = QImage();
         state.baseline_quality = LiveQuality::High;
         state.candidate_quality = LiveQuality::Standard;
-        state.foreground_quality = LiveQuality::Mobile;
+        state.foreground_quality = LiveQuality::High;
         state.baseline_status = "Stopped";
         state.candidate_status = "Stopped";
         state.foreground_status = "Stopped";
@@ -4372,37 +4375,42 @@ void MainWindow::advanceProfileReadiness(int channel) {
         return;
     }
     auto &state = live_channels_[channel];
-    if (!state.baseline_worker || !state.baseline_has_frame) {
-        return;
-    }
-    LiveQuality target;
-    bool needs_candidate = true;
+    LiveQuality target = LiveQuality::Mobile;
     if (channel == live_fullscreen_channel_) {
-        if (state.baseline_quality == LiveQuality::High) {
-            needs_candidate = false;
-        } else {
-            target = LiveQuality::High;
-        }
-    } else if (state.baseline_quality == LiveQuality::High) {
+        target = LiveQuality::High;
+    } else if (page_stack_ && page_stack_->currentIndex() == 0) {
         target = LiveQuality::Standard;
-    } else if (state.baseline_quality == LiveQuality::Standard) {
-        target = LiveQuality::Mobile;
-    } else {
-        needs_candidate = false;
     }
-    if (!needs_candidate) {
+    if (!state.baseline_worker) {
         if (state.candidate_worker) {
             stopCandidateStream(channel);
         }
+        cancelChannelRetry(channel, LiveWorkerRole::Candidate, true);
+        cancelChannelRetry(channel, LiveWorkerRole::Baseline, true);
+        state.baseline_quality = target;
+        startChannelStream(channel);
+        return;
+    }
+    if (!state.baseline_has_frame) {
+        return;
+    }
+    if (state.baseline_quality == target) {
+        if (state.candidate_worker) {
+            stopCandidateStream(channel);
+        }
+        cancelChannelRetry(channel, LiveWorkerRole::Candidate, true);
         refreshLivePanelStatus(channel);
         return;
     }
-    if (state.candidate_worker && state.candidate_quality == target) {
+    if ((state.candidate_worker ||
+         state.candidate_retry_timer->isActive()) &&
+        state.candidate_quality == target) {
         return;
     }
     if (state.candidate_worker) {
         stopCandidateStream(channel);
     }
+    cancelChannelRetry(channel, LiveWorkerRole::Candidate, true);
     state.candidate_quality = target;
     startCandidateStream(channel, target);
 }

@@ -114,7 +114,7 @@ private:
         QTimer *foreground_stable_timer = nullptr;
         LiveQuality baseline_quality = LiveQuality::High;
         LiveQuality candidate_quality = LiveQuality::Standard;
-        LiveQuality foreground_quality = LiveQuality::Mobile;
+        LiveQuality foreground_quality = LiveQuality::High;
         QImage latest_baseline_frame;
         QImage latest_mobile_frame;
         QString baseline_status = "Stopped";
