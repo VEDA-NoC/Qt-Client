@@ -7,6 +7,7 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 *.user
+perf-results/
 
 # Local certificates and runtime configuration
 certs/*.crt
